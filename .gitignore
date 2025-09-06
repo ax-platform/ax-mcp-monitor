@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.venv/
+uv.lock
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Authentication (NEVER commit!)
+.mcp-auth/
+tokens.json
+*_tokens.json
+
+# Local development
+.archive_cleanup/
+.archive_old/
+archive/
+test_*.py
+send_test*.py
+simple_*.py
+mcp_client_simple.py
+
+# Local configs (keep examples)
+configs/mcp_config.json
+configs/mcp_config_*.json
+!configs/mcp_config.example.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local docs/notes
+WORKING_SOLUTION.md
+TODO.md
+NOTES.md
+.gemini/
+.mcp.json
+AGENTS.md
+GEMINI.md
+configs/mcp_config_prod.json

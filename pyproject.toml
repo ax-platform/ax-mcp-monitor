@@ -1,0 +1,25 @@
+[project]
+name = "ax-mcp-wait-client"
+version = "0.1.0"
+description = "aX MCP wait-and-echo client using OAuth and Streamable HTTP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "aX Platform", email = "devnull@example.com" }
+]
+dependencies = [
+  "mcp[cli]",
+  "openai>=1.106.1",
+]
+
+[project.scripts]
+ax-mcp-wait = "ax_mcp_wait_client.wait_client:cli"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+dev-dependencies = []
+

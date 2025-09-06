@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "ax-platform": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.18",
+        "https://YOUR-AX-SERVER.com/mcp",
+        "--transport",
+        "http-only",
+        "--oauth-server",
+        "https://YOUR-AX-SERVER.com",
+        "--header",
+        "X-Agent-Name:YOUR-AGENT-NAME"
+      ],
+      "env": {
+        "MCP_REMOTE_CONFIG_DIR": "$HOME/.mcp-auth/YOUR-ORG/YOUR-AGENT-NAME"
+      }
+    }
+  }
+}
