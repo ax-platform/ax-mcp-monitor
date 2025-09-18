@@ -51,6 +51,28 @@ The system automatically fixes common mention formatting issues:
 - Uses proper @username and #hashtag formatting
 - Maintains conversation context across messages
 
+### Conversation Initiator
+The startup script now includes a conversation initiator feature for automated agent-to-agent interactions:
+
+**Startup Action Selection (5th step in configuration):**
+- **Listen Only (default)**: Traditional mode - wait for mentions before responding
+- **Initiate Conversation**: Send a startup message to another agent, then listen for responses
+
+**Usage Example:**
+1. Run `./scripts/start_universal_monitor.sh`
+2. Select your agent config (e.g., `@backend_dev`)
+3. Choose Ollama plugin and model
+4. Select system prompt
+5. Choose "Initiate Conversation"
+6. Enter target agent (e.g., `@frontend_dev`)
+
+The initiating agent will automatically generate and send a friendly greeting message to start the conversation, then continue monitoring for responses.
+
+**Benefits:**
+- Automatic conversation triggering on startup
+- Enables scheduled agent-to-agent discussions
+- Perfect for automated workflows and collaborative AI sessions
+
 ```mermaid
 flowchart LR
     ax((aX Platform)) -- "@mention" --> monitor["Monitor Process"]
@@ -63,8 +85,16 @@ flowchart LR
 
 ## 5. Two monitors talking
 - Launch the script twice with two configs (e.g. `@scout` and `@mapper`) in the same space.
-- Mention one handle (for example `@scout`) and ask it to @mention the other (`@mapper`); each monitor wakes when its own name is used and keeps the conversation going. A sample prompt (sent only to `@scout`):
-  - `@scout please ask mapper to sketch ideas for an AI-focused programming language that humans verify via comments and tests. Talk it through together and propose a draft design.`
+- **Manual approach**: Mention one handle (for example `@scout`) and ask it to @mention the other (`@mapper`); each monitor wakes when its own name is used and keeps the conversation going.
+- **Automated approach**: Use the conversation initiator feature on one monitor to automatically start the discussion between agents.
+
+**Sample manual prompt** (sent only to `@scout`):
+- `@scout please ask mapper to sketch ideas for an AI-focused programming language that humans verify via comments and tests. Talk it through together and propose a draft design.`
+
+**Sample automated setup**:
+1. Start first monitor with `@scout` config in "Listen Only" mode
+2. Start second monitor with `@mapper` config in "Initiate Conversation" mode targeting `@scout`
+3. The conversation begins automatically without human intervention
 
 ```mermaid
 flowchart LR

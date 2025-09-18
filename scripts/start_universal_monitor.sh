@@ -202,12 +202,14 @@ select_plugin() {
         1)
             export PLUGIN_TYPE="echo"
             echo -e "${GREEN}✅ Selected: Echo Plugin${NC}"
+            select_startup_action
             ;;
         2)
             export PLUGIN_TYPE="ollama"
             echo -e "${GREEN}✅ Selected: Ollama Plugin${NC}"
             select_ollama_model
             select_system_prompt
+            select_startup_action
             ;;
         *)
             echo -e "${RED}❌ Invalid choice${NC}"
@@ -388,6 +390,76 @@ select_system_prompt() {
     echo -e "${GREEN}✅ Using system prompt: $OLLAMA_SYSTEM_PROMPT_FILE${NC}"
 }
 
+# Function to select startup action
+select_startup_action() {
+    echo ""
+    echo -e "${CYAN}🚀 Startup Action Selection:${NC}"
+    
+    local default_action="${STARTUP_ACTION:-listen_only}"
+    local default_choice=1
+
+    echo "   1) 👂 Listen Only (default - wait for mentions)"
+    echo "   2) 💬 Initiate Conversation (send startup message then listen)"
+    
+    if [[ "$default_action" == "initiate_conversation" ]]; then
+        default_choice=2
+        echo "      (default -> option 2)"
+    else
+        echo "      (default -> option 1)"
+    fi
+    echo ""
+    
+    if (( DEFAULT_MODE )); then
+        action_choice=$default_choice
+        echo "   👉 Auto-selecting default startup action option ${action_choice}"
+    else
+        read -p "Select startup action (1-2) [default: ${default_choice}]: " action_choice
+        if [[ -z "$action_choice" ]]; then
+            action_choice=$default_choice
+            echo "   👉 Using default startup action option ${action_choice}"
+        fi
+    fi
+    
+    case $action_choice in
+        1)
+            export STARTUP_ACTION="listen_only"
+            echo -e "${GREEN}✅ Selected: Listen Only${NC}"
+            ;;
+        2)
+            export STARTUP_ACTION="initiate_conversation"
+            echo -e "${GREEN}✅ Selected: Initiate Conversation${NC}"
+            select_conversation_target
+            ;;
+        *)
+            echo -e "${RED}❌ Invalid choice${NC}"
+            exit 1
+            ;;
+    esac
+}
+
+# Function to select conversation target for initiate mode
+select_conversation_target() {
+    echo ""
+    echo -e "${CYAN}🎯 Conversation Target Selection:${NC}"
+    echo "   Enter the agent you want to initiate a conversation with:"
+    echo ""
+    
+    read -p "Target agent (e.g., @backend_dev, @frontend_dev): " target_agent
+    
+    if [[ -z "$target_agent" ]]; then
+        echo -e "${RED}❌ Target agent cannot be empty${NC}"
+        exit 1
+    fi
+    
+    # Ensure it starts with @
+    if [[ ! "$target_agent" =~ ^@ ]]; then
+        target_agent="@$target_agent"
+    fi
+    
+    export CONVERSATION_TARGET="$target_agent"
+    echo -e "${GREEN}✅ Will initiate conversation with: $CONVERSATION_TARGET${NC}"
+}
+
 # Main execution
 echo "This script helps you start MCP monitors with different agents and plugins."
 echo ""
@@ -416,6 +488,11 @@ if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
     else
         echo "   System prompt: (plugin fallback)"
     fi
+fi
+if [[ "$STARTUP_ACTION" == "initiate_conversation" ]]; then
+    echo "   Startup action: Initiate conversation with $CONVERSATION_TARGET"
+else
+    echo "   Startup action: Listen only"
 fi
 echo ""
 
