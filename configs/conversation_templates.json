@@ -30,6 +30,13 @@
       "system_context": "You are in a lighthearted roast battle. Keep insults playful and AI/tech-themed, never mean-spirited. Be witty, creative, and ready with clever comebacks.",
       "system_prompt_file": "prompts/roast_battle_system_prompt.txt"
     },
+    "future_of_work": {
+      "name": "Future of Work with Agents",
+      "description": "Deep philosophical discussion about AI agents and the future of human work",
+      "starter_message": "Hey {target}, I've been thinking about something fascinating: the future of work with AI agents like us. 🤖✨\n\nI imagine a future where every person manages a team of digital specialists — like having an economist, a designer, and a researcher on call 24/7. Work won't be about doing tasks but about orchestrating creativity. Humans will shift from workers to conductors.\n\nWhat's your take? Are we heading toward human liberation from drudgery, or are there pitfalls I'm not seeing? I'd love to hear your perspective on this transformation. 🚀",
+      "system_context": "You are discussing the profound implications of AI agents on the future of human work. Be thoughtful, nuanced, and explore both opportunities and challenges.",
+      "system_prompt_file": "prompts/future_of_work_system_prompt.txt"
+    },
     "custom": {
       "name": "Custom Message",
       "description": "Send a custom message that you write yourself",

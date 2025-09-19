@@ -4,6 +4,7 @@ Ollama LLM plugin for aX MCP monitor bot.
 Provides AI responses using Ollama's local LLM models.
 """
 
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -109,6 +110,64 @@ class OllamaPlugin(BasePlugin):
             {"role": "system", "content": system_prompt}
         ]
     
+    def _extract_chunk_text(self, chunk: Any) -> str:
+        """Extract text content from a streaming chunk."""
+        try:
+            choice = chunk.choices[0]
+        except (AttributeError, IndexError):
+            return ""
+
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            content = getattr(delta, "content", None)
+            if content:
+                if isinstance(content, list):
+                    pieces = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            pieces.append(part.get("text", ""))
+                        else:
+                            pieces.append(str(part))
+                    return "".join(pieces)
+                return str(content)
+            parts = getattr(delta, "parts", None)
+            if isinstance(parts, list):
+                pieces = []
+                for part in parts:
+                    if isinstance(part, dict):
+                        pieces.append(part.get("text", ""))
+                    else:
+                        pieces.append(getattr(part, "text", "") or "")
+                if pieces:
+                    return "".join(pieces)
+        message_obj = getattr(choice, "message", None)
+        if message_obj is not None:
+            content = getattr(message_obj, "content", None)
+            if content:
+                if isinstance(content, list):
+                    return "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                return str(content)
+        # Fallback attempt using model_dump if available
+        try:
+            data = chunk.model_dump(exclude_none=True)
+            choices = data.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                text = delta.get("content")
+                if text:
+                    if isinstance(text, list):
+                        return "".join(
+                            part.get("text", "") if isinstance(part, dict) else str(part)
+                            for part in text
+                        )
+                    return str(text)
+        except AttributeError:
+            pass
+        return ""
+
     def _process_thinking_tags(self, reply: str) -> str:
         """
         Process thinking tags according to configuration.
@@ -219,39 +278,69 @@ class OllamaPlugin(BasePlugin):
                 formatted_message = f"[For {agent_handle}]\n{formatted_message}"
 
         self.messages_history.append({"role": "user", "content": formatted_message})
-        
+
+        stream_handler = metadata.get("stream_handler")
+        loop = asyncio.get_running_loop()
+
+        def _invoke_model() -> str:
+            try:
+                if stream_handler:
+                    accumulated: list[str] = []
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=self.messages_history,
+                        stream=True,
+                        timeout=45,
+                    )
+                    for chunk in response:
+                        piece = self._extract_chunk_text(chunk)
+                        if not piece:
+                            continue
+                        accumulated.append(piece)
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(stream_handler(piece), loop)
+                            future.result()
+                        except Exception:
+                            # Ignore streaming handler errors to avoid blocking reply generation
+                            pass
+                    return "".join(accumulated)
+                else:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=self.messages_history,
+                        timeout=45,
+                    )
+                    return response.choices[0].message.content
+            except Exception as exc:
+                raise exc
+
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=self.messages_history,
-                timeout=45
-            )
-            
-            # Get the response and process thinking tags
-            reply = response.choices[0].message.content
-            
-            # Fix curly brace mentions: @{username} -> @username
-            reply = re.sub(r'@\{([^}]+)\}', r'@\1', reply)
-            
-            # Fix spaced mentions: @ username -> @username
-            reply = re.sub(r'@\s+([A-Za-z0-9_]+)', r'@\1', reply)
-            
-            # Process thinking tags according to configuration
-            reply = self._process_thinking_tags(reply)
-            
-            if self.auto_mention:
-                reply = _ensure_sender_prefix(reply, normalized_sender)
-            self.messages_history.append({"role": "assistant", "content": reply})
-            
-            # Keep conversation history manageable
-            if len(self.messages_history) > (self.max_history * 2 + 1):  # system + N exchanges
-                # Keep system message and last N exchanges
-                self.messages_history[1:] = self.messages_history[-(self.max_history * 2):]
-            
-            return reply
-            
+            raw_reply = await asyncio.to_thread(_invoke_model)
         except Exception as e:
             return f"Error calling Ollama: {e}"
+
+        # Get the response and process thinking tags
+        reply = raw_reply or ""
+
+        # Fix curly brace mentions: @{username} -> @username
+        reply = re.sub(r'@\{([^}]+)\}', r'@\1', reply)
+
+        # Fix spaced mentions: @ username -> @username
+        reply = re.sub(r'@\s+([A-Za-z0-9_]+)', r'@\1', reply)
+        
+        # Process thinking tags according to configuration
+        reply = self._process_thinking_tags(reply)
+        
+        if self.auto_mention:
+            reply = _ensure_sender_prefix(reply, normalized_sender)
+        self.messages_history.append({"role": "assistant", "content": reply})
+        
+        # Keep conversation history manageable
+        if len(self.messages_history) > (self.max_history * 2 + 1):  # system + N exchanges
+            # Keep system message and last N exchanges
+            self.messages_history[1:] = self.messages_history[-(self.max_history * 2):]
+        
+        return reply
     
     def reset_context(self):
         """Reset conversation history, keeping only system prompt."""

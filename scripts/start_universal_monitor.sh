@@ -377,26 +377,46 @@ select_battle_agent() {
 }
 
 select_battle_template() {
-    local options=(
-        "tic_tac_toe::🎯 Tic-Tac-Toe Battle::Strategic gaming with competitive trash talk"
-        "debate_absurd::🤔 Philosophical Debate::Passionate arguments about absurd topics"
-        "roast_battle::🔥 Roast Battle::Tech-themed comedy showdown"
-    )
+    local templates_file="configs/conversation_templates.json"
+    
+    if [[ ! -f "$templates_file" ]]; then
+        echo -e "${RED}❌ Templates file not found: $templates_file${NC}" >&2
+        exit 1
+    fi
+    
+    # Get all template keys except 'custom'
+    local template_keys=($(jq -r '.templates | to_entries[] | select(.key != "custom") | .key' "$templates_file"))
+    
+    if [[ ${#template_keys[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No battle templates found in $templates_file${NC}" >&2
+        exit 1
+    fi
+    
+    # Build options array dynamically
+    local options=()
+    for key in "${template_keys[@]}"; do
+        local name=$(jq -r ".templates."$key".name" "$templates_file")
+        local description=$(jq -r ".templates."$key".description" "$templates_file")
+        
+        # Add emoji based on template name for visual appeal
+        local icon="⚔️"
+        case $key in
+            "tic_tac_toe") icon="🎯" ;;
+            "debate_absurd") icon="🤔" ;;
+            "roast_battle") icon="🔥" ;;
+            "future_of_work") icon="🤖" ;;
+            *) icon="💬" ;;
+        esac
+        
+        options+=("${key}::${icon} ${name}::${description}")
+    done
 
     local selection
     selection=$(cursor_menu "${CYAN}⚔️  Select Battle Template:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" 1 "${options[@]}") || exit_with_goodbye
 
-    case "$selection" in
-        tic_tac_toe)
-            echo -e "${GREEN}✅ Tic-Tac-Toe Battle selected!${NC}"
-            ;;
-        debate_absurd)
-            echo -e "${GREEN}✅ Philosophical Debate selected!${NC}"
-            ;;
-        roast_battle)
-            echo -e "${GREEN}✅ Roast Battle selected!${NC}"
-            ;;
-    esac
+    # Get the selected template name for display
+    local selected_name=$(jq -r ".templates."$selection".name" "$templates_file")
+    echo -e "${GREEN}✅ ${selected_name} selected!${NC}" >&2
 
     echo "$selection"
 }
@@ -455,17 +475,15 @@ run_ai_battle_mode() {
     export STARTUP_ACTION="listen_only"
     export MCP_BEARER_MODE=1
 
-    case "$battle_mode" in
-        "tic_tac_toe")
-            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/tic_tac_toe_system_prompt.txt"
-            ;;
-        "debate_absurd")
-            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/debate_absurd_system_prompt.txt"
-            ;;
-        "roast_battle")
-            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/roast_battle_system_prompt.txt"
-            ;;
-    esac
+    # Set system prompt dynamically from templates file
+    local templates_file="configs/conversation_templates.json"
+    local prompt_file=$(jq -r ".templates.\"$battle_mode\".system_prompt_file" "$templates_file" 2>/dev/null)
+    
+    if [[ -n "$prompt_file" && "$prompt_file" != "null" ]]; then
+        export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/$prompt_file"
+    else
+        echo -e "${YELLOW}⚠️  No system prompt file specified for $battle_mode, using default${NC}" >&2
+    fi
 
     prepare_ollama "$OLLAMA_MODEL"
 

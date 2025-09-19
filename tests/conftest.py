@@ -57,9 +57,27 @@ def patch_openai(monkeypatch: pytest.MonkeyPatch) -> Callable[[List[str]], List[
             self.responses: List[str] = []
             self.calls: List[dict[str, Any]] = []
 
-            def create(model: str, messages: list[dict[str, Any]], timeout: int) -> Any:
-                self.calls.append({"model": model, "messages": messages, "timeout": timeout})
+            def create(
+                model: str,
+                messages: list[dict[str, Any]],
+                timeout: int = 45,
+                stream: bool = False,
+                **_: Any,
+            ) -> Any:
+                self.calls.append(
+                    {
+                        "model": model,
+                        "messages": messages,
+                        "timeout": timeout,
+                        "stream": stream,
+                    }
+                )
                 content = self.responses.pop(0) if self.responses else "dummy reply"
+                if stream:
+                    chunk = SimpleNamespace(
+                        choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
+                    )
+                    return iter([chunk])
                 message = SimpleNamespace(content=content)
                 choice = SimpleNamespace(message=message)
                 return SimpleNamespace(choices=[choice])
