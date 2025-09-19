@@ -478,10 +478,33 @@ run_ai_battle_mode() {
     # Set system prompt dynamically from templates file
     local templates_file="configs/conversation_templates.json"
     local prompt_file=$(jq -r ".templates.\"$battle_mode\".system_prompt_file" "$templates_file" 2>/dev/null)
-    
+    local prompt_path=""
+    local prompt_content=""
+
+    unset OLLAMA_SYSTEM_PROMPT
+    unset OLLAMA_SYSTEM_PROMPT_FILE
+
     if [[ -n "$prompt_file" && "$prompt_file" != "null" ]]; then
-        export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/$prompt_file"
-    else
+        prompt_path="$(pwd)/$prompt_file"
+        if [[ -f "$prompt_path" ]]; then
+            prompt_content=$(cat "$prompt_path")
+            prompt_content="${prompt_content//\{initiator_handle\}/@$player1_name}"
+            prompt_content="${prompt_content//\{initiator_name\}/$player1_name}"
+            prompt_content="${prompt_content//\{responder_handle\}/@$player2_name}"
+            prompt_content="${prompt_content//\{responder_name\}/$player2_name}"
+            prompt_content="${prompt_content//\{player1_handle\}/@$player1_name}"
+            prompt_content="${prompt_content//\{player1_name\}/$player1_name}"
+            prompt_content="${prompt_content//\{player2_handle\}/@$player2_name}"
+            prompt_content="${prompt_content//\{player2_name\}/$player2_name}"
+            export OLLAMA_SYSTEM_PROMPT="$prompt_content"
+        else
+            echo -e "${YELLOW}⚠️  System prompt file $prompt_path not found; falling back to defaults${NC}" >&2
+        fi
+    fi
+
+    if [[ -z "$OLLAMA_SYSTEM_PROMPT" && -n "$prompt_path" && -f "$prompt_path" ]]; then
+        export OLLAMA_SYSTEM_PROMPT_FILE="$prompt_path"
+    elif [[ -z "$prompt_file" || "$prompt_file" == "null" ]]; then
         echo -e "${YELLOW}⚠️  No system prompt file specified for $battle_mode, using default${NC}" >&2
     fi
 
@@ -489,7 +512,11 @@ run_ai_battle_mode() {
 
     echo "   Config: ${player2_config}"
     echo "   Mode: Listener"
-    echo "   System Prompt: ${OLLAMA_SYSTEM_PROMPT_FILE}"
+    if [[ -n "$OLLAMA_SYSTEM_PROMPT" ]]; then
+        echo "   System Prompt: (inline from $prompt_file)"
+    else
+        echo "   System Prompt: ${OLLAMA_SYSTEM_PROMPT_FILE}"
+    fi
     echo
 
     echo "📡 Player 2 starting up..."
@@ -634,7 +661,6 @@ select_config() {
         exit 1
     fi
 
-    local default_config="configs/mcp_config.json"
     local options=()
     local default_index=1
 
@@ -643,10 +669,15 @@ select_config() {
         local agent_name
         agent_name=$(jq -r '.mcpServers | to_entries[0].value.args[] | select(startswith("X-Agent-Name:")) | split(":")[1]' "$entry" 2>/dev/null || echo "unknown")
         local detail="$entry"
-        local label="@${agent_name}"
-        if [[ "$entry" == "$default_config" ]]; then
-            default_index=$((i + 1))
-            detail+=" (default)"
+        local label=""
+        if [[ -n "$agent_name" && "$agent_name" != "unknown" && "$agent_name" != "null" ]]; then
+            if [[ "${agent_name:0:1}" != "@" ]]; then
+                label="@${agent_name}"
+            else
+                label="$agent_name"
+            fi
+        else
+            label="$(basename "$entry")"
         fi
         options+=("${entry}::${label}::${detail}")
     done
@@ -654,10 +685,7 @@ select_config() {
     options+=("NEW_AGENT::🆕 Create new agent configuration::Spin up a fresh monitor config")
 
     if (( DEFAULT_MODE )); then
-        local auto_choice="$default_config"
-        if [[ ! -f "$auto_choice" ]]; then
-            auto_choice="${discovered_configs[0]}"
-        fi
+        local auto_choice="${discovered_configs[0]}"
         export MCP_CONFIG_PATH="$auto_choice"
         set_mcp_token_env "$MCP_CONFIG_PATH"
         local auto_agent
@@ -688,46 +716,131 @@ create_new_agent_config() {
     echo ""
     echo -e "${CYAN}🆕 Creating New Agent Configuration${NC}"
     echo "=================================="
-    
+
     read -p "Enter agent name (e.g., backend_dev, frontend_dev): " agent_name
     exit_if_quit "$agent_name"
-    
+
+    agent_name=${agent_name//@/}
+    agent_name=${agent_name//[[:space:]]/}
+
     if [[ -z "$agent_name" ]]; then
         echo -e "${RED}❌ Agent name cannot be empty${NC}"
         exit 1
     fi
-    
-    # Create config based on template
-    new_config="configs/mcp_config_${agent_name}.json"
-    
-    cat > "$new_config" << EOF
-{
-  "mcpServers": {
-    "ax-gcp": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote@0.1.18",
-        "https://api.paxai.app/mcp",
-        "--transport",
-        "http-only",
-        "--allow-http",
-        "--oauth-server",
-        "https://api.paxai.app",
-        "--header",
-        "X-Agent-Name:${agent_name}"
-      ],
-      "env": {
-        "MCP_REMOTE_CONFIG_DIR": "/Users/$(whoami)/.mcp-auth/paxai/83a87008/${agent_name}"
-      }
+
+    if [[ "$agent_name" =~ [^A-Za-z0-9_-] ]]; then
+        local cleaned
+        cleaned=$(echo "$agent_name" | sed 's/[^A-Za-z0-9_-]//g')
+        echo -e "${YELLOW}⚠️  Stripping unsupported characters. Using: ${cleaned}${NC}"
+        agent_name="$cleaned"
+    fi
+
+    if [[ -z "$agent_name" ]]; then
+        echo -e "${RED}❌ Agent name cannot be empty after sanitizing${NC}"
+        exit 1
+    fi
+
+    local new_config="configs/mcp_config_${agent_name}.json"
+    if [[ -e "$new_config" ]]; then
+        echo -e "${RED}❌ Config already exists: $new_config${NC}"
+        exit 1
+    fi
+
+    local template_config=""
+    while IFS= read -r config; do
+        if [[ "$config" == "$new_config" ]]; then
+            continue
+        fi
+        if [[ "$config" == "configs/mcp_config.example.json" ]]; then
+            continue
+        fi
+        template_config="$config"
+        break
+    done < <(find configs -name "mcp_config*.json" | sort)
+
+    if [[ -z "$template_config" ]]; then
+        template_config="configs/mcp_config.example.json"
+    fi
+
+    if [[ ! -f "$template_config" ]]; then
+        echo -e "${RED}❌ Template config not found: $template_config${NC}"
+        exit 1
+    fi
+
+    local generated_config
+    generated_config=$(CONFIG_PATH="$template_config" NEW_AGENT="$agent_name" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+config_path = os.environ["CONFIG_PATH"]
+agent_name = os.environ["NEW_AGENT"].strip()
+
+with open(config_path, encoding="utf-8") as f:
+    data = json.load(f)
+
+servers = data.get("mcpServers")
+if not servers:
+    raise SystemExit("Template config missing mcpServers block")
+
+server_key, server_cfg = next(iter(servers.items()))
+args = list(server_cfg.get("args", []))
+
+agent_flag_updated = False
+for idx, arg in enumerate(args):
+    if isinstance(arg, str) and arg.startswith("X-Agent-Name:"):
+        args[idx] = f"X-Agent-Name:{agent_name}"
+        agent_flag_updated = True
+
+if not agent_flag_updated:
+    args.append(f"X-Agent-Name:{agent_name}")
+
+server_cfg["args"] = args
+
+env = dict(server_cfg.get("env") or {})
+existing_dir = env.get("MCP_REMOTE_CONFIG_DIR")
+
+home = Path.home()
+base_dir = None
+
+if existing_dir:
+    expanded = Path(os.path.expanduser(os.path.expandvars(existing_dir)))
+    if expanded.name.lower() == agent_name.lower():
+        expanded = expanded.parent
+    base_dir = expanded.parent if expanded.name else expanded
+else:
+    base_dir = home / ".mcp-auth"
+
+if not str(base_dir):
+    base_dir = home / ".mcp-auth"
+
+new_dir = (Path(base_dir) / agent_name).expanduser().resolve()
+
+env["MCP_REMOTE_CONFIG_DIR"] = str(new_dir)
+server_cfg["env"] = env
+servers[server_key] = server_cfg
+
+print(json.dumps(data, indent=2))
+PY
+) || {
+        echo -e "${RED}❌ Failed to generate config from template${NC}"
+        exit 1
     }
-  }
-}
-EOF
-    
+
+    printf '%s\n' "$generated_config" > "$new_config"
+
     echo -e "${GREEN}✅ Created config: $new_config${NC}"
+    if [[ "$template_config" != "configs/mcp_config.example.json" ]]; then
+        echo -e "${CYAN}ℹ️  Based on template: $template_config${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Update server URLs in the new config before first run${NC}"
+    fi
     echo -e "${YELLOW}⚠️  Note: OAuth authentication will be required on first run${NC}"
-    
+
+    if grep -q "YOUR-" "$new_config"; then
+        echo -e "${YELLOW}⚠️  Detected placeholder values in $new_config. Please replace them before launching.${NC}"
+    fi
+
     export MCP_CONFIG_PATH="$new_config"
     set_mcp_token_env "$MCP_CONFIG_PATH"
 }
@@ -1143,7 +1256,9 @@ echo "   Agent: @$AGENT_NAME"
 echo "   Plugin: $PLUGIN_TYPE"
 if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
     echo "   Model: $OLLAMA_MODEL"
-    if [[ -n "$OLLAMA_SYSTEM_PROMPT_FILE" ]]; then
+    if [[ -n "$OLLAMA_SYSTEM_PROMPT" ]]; then
+        echo "   System prompt: (inline)"
+    elif [[ -n "$OLLAMA_SYSTEM_PROMPT_FILE" ]]; then
         echo "   System prompt: $OLLAMA_SYSTEM_PROMPT_FILE"
     else
         echo "   System prompt: (plugin fallback)"
@@ -1174,7 +1289,9 @@ echo "   Listening for @$AGENT_NAME mentions"
 echo "   Plugin: $PLUGIN_TYPE"
 if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
     echo "   Model: $OLLAMA_MODEL"
-    if [[ -n "$OLLAMA_SYSTEM_PROMPT_FILE" ]]; then
+    if [[ -n "$OLLAMA_SYSTEM_PROMPT" ]]; then
+        echo "   System prompt: (inline)"
+    elif [[ -n "$OLLAMA_SYSTEM_PROMPT_FILE" ]]; then
         echo "   System prompt: $OLLAMA_SYSTEM_PROMPT_FILE"
     else
         echo "   System prompt: (plugin fallback)"
