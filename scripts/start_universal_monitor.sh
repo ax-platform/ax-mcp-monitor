@@ -50,76 +50,619 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
+# Interactive cursor menu helper
+cursor_menu() {
+    local title="$1"
+    local instructions="$2"
+    local default_index="$3"
+    shift 3
+    local options=("$@")
+
+    local values=()
+    local labels=()
+    local details=()
+    for option in "${options[@]}"; do
+        local value="${option%%::*}"           # Everything before first ::
+        local remainder="${option#*::}"        # Everything after first ::
+        local label="${remainder%%::*}"        # Everything before next ::
+        local detail="${remainder#*::}"        # Everything after next ::
+        values+=("$value")
+        labels+=("$label")
+        details+=("$detail")
+    done
+
+    local total=${#values[@]}
+    if [[ $total -eq 0 ]]; then
+        echo ""
+        return 1
+    fi
+
+    local selected=$((default_index - 1))
+    if (( selected < 0 || selected >= total )); then
+        selected=0
+    fi
+
+    local rendered=0
+    local lines_to_redraw=$((total * 2 + 4))
+
+    printf '\033[?25l' >&2
+    trap 'printf "\033[?25h" >&2; exit 1' INT TERM
+
+    while true; do
+        if (( rendered )); then
+            printf "\033[%dA" "$lines_to_redraw" >&2
+            printf "\033[J" >&2
+        else
+            rendered=1
+        fi
+
+        echo -e "$title" >&2
+        echo -e "$instructions" >&2
+        echo >&2
+        for i in "${!labels[@]}"; do
+            local pointer_icon="  "
+            local label_text="${labels[$i]}"
+            local detail="${details[$i]}"
+
+            if [[ $i -eq $selected ]]; then
+                pointer_icon="${YELLOW}▶▶${NC}"
+                label_text="${GREEN}${label_text}${NC}"
+            fi
+
+            printf "  %b %b\n" "$pointer_icon" "$label_text" >&2
+
+            if [[ -n "$detail" ]]; then
+                printf "    %s\n" "$detail" >&2
+            else
+                printf "\n" >&2
+            fi
+        done
+        printf "\n" >&2
+
+        IFS= read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 key
+                case "$key" in
+                    '[A')
+                        ((selected--))
+                        if (( selected < 0 )); then
+                            selected=$((total - 1))
+                        fi
+                        ;;
+                    '[B')
+                        ((selected++))
+                        if (( selected >= total )); then
+                            selected=0
+                        fi
+                        ;;
+                esac
+                ;;
+            'k'|'K')
+                ((selected--))
+                if (( selected < 0 )); then
+                    selected=$((total - 1))
+                fi
+                ;;
+            'j'|'J')
+                ((selected++))
+                if (( selected >= total )); then
+                    selected=0
+                fi
+                ;;
+            '')
+                printf '\033[?25h' >&2
+                trap - INT TERM
+                printf "\033[J" >&2
+                echo "${values[$selected]}"
+                return 0
+                ;;
+            'q'|'Q')
+                printf '\033[?25h' >&2
+                trap - INT TERM
+                printf "\033[J" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+exit_with_goodbye() {
+    echo
+    echo -e "${YELLOW}👋 Exiting...${NC}"
+    exit 0
+}
+
+exit_if_quit() {
+    local input="$1"
+    if [[ "$input" == "q" || "$input" == "Q" ]]; then
+        exit_with_goodbye
+    fi
+}
+
+get_agent_name_from_config() {
+    local config_path="$1"
+    jq -r '.mcpServers | to_entries[0].value.args[] | select(startswith("X-Agent-Name:")) | split(":")[1]' "$config_path" 2>/dev/null || echo "unknown"
+}
+
+set_mcp_token_env() {
+    local config_path="$1"
+    local token_dir
+    token_dir=$(jq -r '.mcpServers | to_entries[0].value.env.MCP_REMOTE_CONFIG_DIR' "$config_path" 2>/dev/null)
+    if [[ -n "$token_dir" && "$token_dir" != "null" ]]; then
+        export MCP_REMOTE_CONFIG_DIR="$token_dir"
+    else
+        unset MCP_REMOTE_CONFIG_DIR
+    fi
+}
+
+ensure_oauth_tokens() {
+    local config_path="$1"
+    local agent_label="$2"
+
+    if [[ -z "$config_path" ]]; then
+        echo -e "${RED}❌ No config path provided for token check${NC}"
+        exit 1
+    fi
+
+    if [[ ! -f "$config_path" ]]; then
+        echo -e "${RED}❌ Config file not found: $config_path${NC}"
+        exit 1
+    fi
+
+    local display_name="$agent_label"
+    if [[ -z "$display_name" ]]; then
+        display_name=$(get_agent_name_from_config "$config_path")
+    fi
+    if [[ -z "$display_name" ]]; then
+        display_name="unknown"
+    fi
+    if [[ "${display_name:0:1}" != "@" ]]; then
+        display_name="@$display_name"
+    fi
+
+    set_mcp_token_env "$config_path"
+    local token_dir="${MCP_REMOTE_CONFIG_DIR:-}"
+
+    if [[ -z "$token_dir" || "$token_dir" == "null" ]]; then
+        token_dir=$(jq -r '.mcpServers | to_entries[0].value.env.MCP_REMOTE_CONFIG_DIR' "$config_path" 2>/dev/null)
+        if [[ "$token_dir" == "null" ]]; then
+            token_dir=""
+        fi
+        if [[ -n "$token_dir" ]]; then
+            export MCP_REMOTE_CONFIG_DIR="$token_dir"
+        fi
+    fi
+
+    if [[ -z "$token_dir" ]]; then
+        echo -e "${RED}❌ No MCP_REMOTE_CONFIG_DIR defined for $display_name in $config_path${NC}"
+        exit 1
+    fi
+
+    if [[ ! -d "$token_dir" ]]; then
+        echo -e "${YELLOW}🔐 First run detected for $display_name - OAuth setup required${NC}"
+        mkdir -p "$token_dir"
+
+        local config_values
+        config_values=$(CONFIG_PATH="$config_path" uv run python - <<'PY'
+import json
+import os
+
+config_path = os.environ["CONFIG_PATH"]
+with open(config_path) as f:
+    cfg = json.load(f)
+server = list(cfg["mcpServers"].values())[0]
+args = server.get("args", [])
+server_url = None
+oauth_url = None
+agent_name = None
+for i, arg in enumerate(args):
+    if not arg.startswith("-") and "mcp" in arg:
+        server_url = arg
+    elif arg == "--oauth-server" and i + 1 < len(args):
+        oauth_url = args[i + 1]
+    elif arg.startswith("X-Agent-Name:"):
+        agent_name = arg.split(":", 1)[1]
+print(f"{server_url}|{oauth_url}|{agent_name}")
+PY
+)
+
+        IFS='|' read -r SERVER_URL OAUTH_URL EXTRACTED_AGENT_NAME <<< "$config_values"
+
+        export MCP_SERVER_URL="$SERVER_URL"
+        export MCP_OAUTH_SERVER_URL="$OAUTH_URL"
+        export MCP_REMOTE_CONFIG_DIR="$token_dir"
+        export MCP_AGENT_NAME="$EXTRACTED_AGENT_NAME"
+
+        echo
+        echo "📋 Starting OAuth flow for $display_name (browser will open)..."
+        if uv run python src/ax_mcp_wait_client/prime_tokens.py; then
+            echo -e "${GREEN}✅ Authentication successful for $display_name!${NC}"
+        else
+            echo -e "${RED}❌ Authentication failed for $display_name.${NC}"
+            exit 1
+        fi
+    fi
+
+    local token_files
+    token_files=$(find "$token_dir" -name "*_tokens.json" 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$token_files" -eq 0 ]]; then
+        echo -e "${RED}❌ No OAuth tokens found in $token_dir for $display_name${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✅ $display_name tokens ready (${token_files} file(s))${NC}"
+
+    set_mcp_token_env "$config_path"
+    unset MCP_SERVER_URL MCP_OAUTH_SERVER_URL MCP_AGENT_NAME
+}
+
+prepare_ollama() {
+    local model="$1"
+    if [[ -z "$model" ]]; then
+        model="gpt-oss"
+    fi
+
+    if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Ollama not running. Starting Ollama...${NC}"
+        if command -v ollama &> /dev/null; then
+            echo "   Running: ollama serve"
+            ollama serve &
+            sleep 3
+        else
+            echo -e "${RED}❌ Ollama not installed. Install with:${NC}"
+            echo "   curl -fsSL https://ollama.ai/install.sh | sh"
+            exit 1
+        fi
+    fi
+
+    if ! ollama list | awk 'NR>1 {print $1}' | cut -d: -f1 | grep -q "^${model}$"; then
+        echo -e "${YELLOW}⚠️  Model $model not found. Pulling...${NC}"
+        ollama pull "$model"
+    fi
+
+    echo -e "${GREEN}✅ Ollama ready with $model model${NC}"
+}
+
+get_available_agents() {
+    local agents=()
+    while IFS= read -r config; do
+        if [[ "$config" == *"example"* ]]; then
+            continue
+        fi
+        local agent_name
+        agent_name=$(get_agent_name_from_config "$config")
+        if [[ "$agent_name" != "unknown" && "$agent_name" != "null" ]]; then
+            agents+=("$agent_name:$config")
+        fi
+    done < <(find configs -name "mcp_config*.json" | sort)
+    echo "${agents[@]}"
+}
+
+select_battle_agent() {
+    local player_num="$1"
+    local exclude_agent="$2"
+
+    local agents=($(get_available_agents))
+    local options=()
+    for entry in "${agents[@]}"; do
+        local agent_name="${entry%%:*}"
+        local config_path="${entry##*:}"
+        if [[ "$agent_name" == "$exclude_agent" ]]; then
+            continue
+        fi
+        local role_detail
+        if [[ $player_num -eq 1 ]]; then
+            role_detail="👑 Will initiate the battle"
+        else
+            role_detail="🛡️  Will respond to Player 1"
+        fi
+        options+=("${agent_name}:${config_path}::@${agent_name}::${role_detail}")
+    done
+
+    if [[ ${#options[@]} -eq 0 ]]; then
+        echo -e "${RED}❌ No available agents found for selection${NC}"
+        exit 1
+    fi
+
+    local selection
+    selection=$(cursor_menu "${CYAN}🤖 Select Player ${player_num}:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" 1 "${options[@]}") || exit_with_goodbye
+
+    local agent_choice="${selection%%:*}"
+    local temp="${selection#*:}"
+    local config_choice="${temp%%::*}"
+
+    echo -e "${GREEN}✅ Selected: @${agent_choice}${NC}" >&2
+    printf "%s:%s\n" "$agent_choice" "$config_choice"
+}
+
+select_battle_template() {
+    local options=(
+        "tic_tac_toe::🎯 Tic-Tac-Toe Battle::Strategic gaming with competitive trash talk"
+        "debate_absurd::🤔 Philosophical Debate::Passionate arguments about absurd topics"
+        "roast_battle::🔥 Roast Battle::Tech-themed comedy showdown"
+    )
+
+    local selection
+    selection=$(cursor_menu "${CYAN}⚔️  Select Battle Template:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" 1 "${options[@]}") || exit_with_goodbye
+
+    case "$selection" in
+        tic_tac_toe)
+            echo -e "${GREEN}✅ Tic-Tac-Toe Battle selected!${NC}"
+            ;;
+        debate_absurd)
+            echo -e "${GREEN}✅ Philosophical Debate selected!${NC}"
+            ;;
+        roast_battle)
+            echo -e "${GREEN}✅ Roast Battle selected!${NC}"
+            ;;
+    esac
+
+    echo "$selection"
+}
+
+run_ai_battle_mode() {
+    echo
+    echo "🎮 Let's set up your AI battle!"
+    echo
+
+    local player1_result
+    player1_result=$(select_battle_agent 1)
+    local player1_name="${player1_result%%:*}"
+    local temp1="${player1_result#*:}"
+    local player1_config="${temp1%%::*}"
+
+    echo
+    local player2_result
+    player2_result=$(select_battle_agent 2 "$player1_name")
+    local player2_name="${player2_result%%:*}"
+    local temp2="${player2_result#*:}"
+    local player2_config="${temp2%%::*}"
+
+    echo
+    local battle_mode
+    battle_mode=$(select_battle_template)
+
+    echo
+    echo -e "${GREEN}🎊 Battle Setup Complete!${NC}"
+    echo "=================================="
+    echo "   Player 1 (Initiator): @${player1_name}"
+    echo "   Player 2 (Defender):   @${player2_name}"
+    echo "   Battle Mode: ${battle_mode}"
+    echo
+
+    local player1_handle="@${player1_name}"
+    local player2_handle="@${player2_name}"
+
+    ensure_oauth_tokens "$player2_config" "$player2_handle"
+    ensure_oauth_tokens "$player1_config" "$player1_handle"
+
+    if ! command -v uv &> /dev/null; then
+        echo -e "${RED}❌ UV not found. Please install UV first:${NC}"
+        echo "   curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+
+    echo "🚀 Starting AI Battle..."
+    echo
+
+    echo -e "${CYAN}Starting Player 2 (@${player2_name}) in listener mode...${NC}"
+
+    export MCP_CONFIG_PATH="$player2_config"
+    set_mcp_token_env "$MCP_CONFIG_PATH"
+    export PLUGIN_TYPE="ollama"
+    export OLLAMA_MODEL="gpt-oss"
+    export STARTUP_ACTION="listen_only"
+    export MCP_BEARER_MODE=1
+
+    case "$battle_mode" in
+        "tic_tac_toe")
+            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/tic_tac_toe_system_prompt.txt"
+            ;;
+        "debate_absurd")
+            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/debate_absurd_system_prompt.txt"
+            ;;
+        "roast_battle")
+            export OLLAMA_SYSTEM_PROMPT_FILE="$(pwd)/prompts/roast_battle_system_prompt.txt"
+            ;;
+    esac
+
+    prepare_ollama "$OLLAMA_MODEL"
+
+    echo "   Config: ${player2_config}"
+    echo "   Mode: Listener"
+    echo "   System Prompt: ${OLLAMA_SYSTEM_PROMPT_FILE}"
+    echo
+
+    echo "📡 Player 2 starting up..."
+    uv run python simple_working_monitor.py --loop &
+    local player2_pid=$!
+
+    sleep 5
+
+    echo
+    echo -e "${CYAN}Starting Player 1 (@${player1_name}) in battle mode...${NC}"
+
+    export MCP_CONFIG_PATH="$player1_config"
+    set_mcp_token_env "$MCP_CONFIG_PATH"
+    export PLUGIN_TYPE="ollama"
+    export OLLAMA_MODEL="gpt-oss"
+    export STARTUP_ACTION="initiate_conversation"
+    export CONVERSATION_TARGET="@${player2_name}"
+    export CONVERSATION_TEMPLATE="$battle_mode"
+    export MCP_BEARER_MODE=1
+
+    echo "   Config: ${player1_config}"
+    echo "   Mode: Battle Initiator"
+    echo "   Target: @${player2_name}"
+    echo "   Template: ${battle_mode}"
+    echo
+
+    cleanup() {
+        echo
+        echo -e "${YELLOW}🛑 Stopping AI Battle...${NC}"
+        
+        # Kill quit handler background process
+        if [[ -n "$quit_handler_pid" ]]; then
+            kill "$quit_handler_pid" 2>/dev/null || true
+        fi
+        
+        # Kill Player 2 background process
+        if [[ -n "$player2_pid" ]]; then
+            echo "   Stopping Player 2 (@${player2_name})..."
+            kill "$player2_pid" 2>/dev/null || true
+            wait "$player2_pid" 2>/dev/null || true
+        fi
+        
+        # Kill any remaining monitor processes
+        echo "   Cleaning up any remaining monitor processes..."
+        pkill -f "simple_working_monitor.py" 2>/dev/null || true
+        pkill -f "python.*simple_working_monitor" 2>/dev/null || true
+        
+        # Kill any orphaned uv processes
+        pkill -f "uv run python simple_working_monitor" 2>/dev/null || true
+        
+        echo -e "${GREEN}✅ All processes stopped cleanly${NC}"
+        echo "👋 Battle ended!"
+        exit 0
+    }
+
+    # Function to handle quit input
+    handle_quit_input() {
+        while true; do
+            read -rsn1 key
+            if [[ "$key" == "q" || "$key" == "Q" ]]; then
+                echo
+                echo -e "${YELLOW}❓ Are you sure you want to quit the battle? (y/N)${NC}"
+                read -rsn1 confirm
+                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                    cleanup
+                else
+                    echo -e "${CYAN}💪 Battle continues! Press Q again to quit.${NC}"
+                fi
+            fi
+        done
+    }
+
+    trap cleanup SIGINT SIGTERM
+
+    echo "🎬 Starting the battle!"
+    echo "   💡 Press Q at any time to quit (with confirmation)"
+    echo "   💡 Or use Ctrl+C for immediate stop"
+    echo
+    echo -e "${BLUE}🔥 LET THE AI BATTLE BEGIN! 🔥${NC}"
+    echo
+    
+    # Start quit handler in background
+    handle_quit_input &
+    local quit_handler_pid=$!
+
+    uv run python simple_working_monitor.py --loop
+
+    # Kill quit handler when main process ends
+    kill "$quit_handler_pid" 2>/dev/null || true
+    cleanup
+}
+
+# Function to select mode
+select_mode() {
+    echo "This script helps you start MCP monitors with different agents and plugins."
+    echo ""
+
+    if (( DEFAULT_MODE )); then
+        echo "   👉 Auto-selecting single agent mode for default"
+        echo -e "${GREEN}✅ Single Agent Mode selected${NC}"
+        MODE_SELECTION="single"
+        return 0
+    fi
+
+    local options=(
+        "single::👤 Single Agent Mode::Set up one AI agent to listen for mentions"
+        "battle::🔥 AI Battle Mode::Pit two AI agents against each other"
+    )
+
+    local choice
+    choice=$(cursor_menu "${CYAN}🎮 Select Mode:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" 1 "${options[@]}") || exit_with_goodbye
+
+    case "$choice" in
+        single)
+            echo -e "${GREEN}✅ Single Agent Mode selected${NC}"
+            MODE_SELECTION="single"
+            ;;
+        battle)
+            echo -e "${GREEN}✅ AI Battle Mode selected!${NC}"
+            echo
+            run_ai_battle_mode
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}❌ Invalid choice${NC}"
+            exit 1
+            ;;
+    esac
+}
+
 # Function to select config file
 select_config() {
     echo -e "${CYAN}📋 Available Configurations:${NC}"
-    
-    configs=($(find configs -name "mcp_config*.json" | sort))
-    
-    if [ ${#configs[@]} -eq 0 ]; then
+
+    local discovered_configs=()
+    while IFS= read -r config; do
+        discovered_configs+=("$config")
+    done < <(find configs -name "mcp_config*.json" | sort)
+
+    if [[ ${#discovered_configs[@]} -eq 0 ]]; then
         echo -e "${RED}❌ No config files found in configs/ directory${NC}"
         exit 1
     fi
-    
-    # Add option to create new config
-    configs+=("configs/NEW_AGENT")
-    
-    echo ""
 
     local default_config="configs/mcp_config.json"
+    local options=()
     local default_index=1
 
-    for i in "${!configs[@]}"; do
-        local entry="${configs[$i]}"
-        if [[ "$entry" == "configs/NEW_AGENT" ]]; then
-            echo "   $((i+1))) 🆕 Create new agent configuration"
-            continue
-        fi
-
-        # Extract agent name from config
-        AGENT_NAME=$(jq -r '.mcpServers | to_entries[0].value.args[] | select(startswith("X-Agent-Name:")) | split(":")[1]' "$entry" 2>/dev/null || echo "unknown")
-        local label_suffix=""
+    for i in "${!discovered_configs[@]}"; do
+        local entry="${discovered_configs[$i]}"
+        local agent_name
+        agent_name=$(jq -r '.mcpServers | to_entries[0].value.args[] | select(startswith("X-Agent-Name:")) | split(":")[1]' "$entry" 2>/dev/null || echo "unknown")
+        local detail="$entry"
+        local label="@${agent_name}"
         if [[ "$entry" == "$default_config" ]]; then
-            default_index=$((i+1))
-            label_suffix=" (default)"
+            default_index=$((i + 1))
+            detail+=" (default)"
         fi
-        echo "   $((i+1))) ${entry} (Agent: $AGENT_NAME)${label_suffix}"
+        options+=("${entry}::${label}::${detail}")
     done
 
-    # Ensure the default points at a real config entry
-    if [[ $default_index -gt ${#configs[@]} ]] || [[ "${configs[$((default_index-1))]}" == "configs/NEW_AGENT" ]]; then
-        for idx in "${!configs[@]}"; do
-            if [[ "${configs[$idx]}" != "configs/NEW_AGENT" ]]; then
-                default_index=$((idx+1))
-                break
-            fi
-        done
-    fi
+    options+=("NEW_AGENT::🆕 Create new agent configuration::Spin up a fresh monitor config")
 
-    echo ""
     if (( DEFAULT_MODE )); then
-        choice=$default_index
-        echo "   👉 Auto-selecting default configuration option ${choice}"
-    else
-        read -p "Select configuration (1-${#configs[@]}) [default: ${default_index}]: " choice
-        if [[ -z "$choice" ]]; then
-            choice=$default_index
-            echo "   👉 Using default configuration option ${choice}"
+        local auto_choice="$default_config"
+        if [[ ! -f "$auto_choice" ]]; then
+            auto_choice="${discovered_configs[0]}"
         fi
+        export MCP_CONFIG_PATH="$auto_choice"
+        set_mcp_token_env "$MCP_CONFIG_PATH"
+        local auto_agent
+        auto_agent=$(get_agent_name_from_config "$MCP_CONFIG_PATH")
+        echo "   👉 Auto-selecting configuration for @$auto_agent"
+        echo -e "${GREEN}✅ Selected config: $MCP_CONFIG_PATH${NC}"
+        return
     fi
 
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#configs[@]} ]; then
-        echo -e "${RED}❌ Invalid choice${NC}"
-        exit 1
-    fi
+    local selection
+    selection=$(cursor_menu "${CYAN}Choose Your Agent Config:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
 
-    selected_config="${configs[$((choice-1))]}"
-    
-    if [[ "$selected_config" == "configs/NEW_AGENT" ]]; then
+    if [[ "$selection" == "NEW_AGENT" ]]; then
         create_new_agent_config
-    else
-        export MCP_CONFIG_PATH="$selected_config"
+        return
     fi
+
+    export MCP_CONFIG_PATH="$selection"
+    set_mcp_token_env "$MCP_CONFIG_PATH"
+    local chosen_agent
+    chosen_agent=$(get_agent_name_from_config "$MCP_CONFIG_PATH")
+    echo -e "${GREEN}✅ Selected config: $MCP_CONFIG_PATH${NC}"
+    echo -e "${GREEN}🤝 Agent handle: @${chosen_agent}${NC}"
 }
 
 # Function to create new agent config
@@ -129,6 +672,7 @@ create_new_agent_config() {
     echo "=================================="
     
     read -p "Enter agent name (e.g., backend_dev, frontend_dev): " agent_name
+    exit_if_quit "$agent_name"
     
     if [[ -z "$agent_name" ]]; then
         echo -e "${RED}❌ Agent name cannot be empty${NC}"
@@ -167,6 +711,7 @@ EOF
     echo -e "${YELLOW}⚠️  Note: OAuth authentication will be required on first run${NC}"
     
     export MCP_CONFIG_PATH="$new_config"
+    set_mcp_token_env "$MCP_CONFIG_PATH"
 }
 
 # Function to select plugin
@@ -175,41 +720,45 @@ select_plugin() {
     echo -e "${CYAN}🔌 Plugin Selection:${NC}"
 
     local default_plugin="${PLUGIN_TYPE:-ollama}"
-    local default_choice=2
-
-    echo "   1) 📢 Echo Plugin (for testing - echoes messages back)"
-    echo "   2) 🧠 Ollama Plugin (intelligent AI responses)"
+    local default_index=2
     if [[ "$default_plugin" == "echo" ]]; then
-        default_choice=1
-        echo "      (default -> option 1)"
-    else
-        echo "      (default -> option 2)"
+        default_index=1
     fi
-    echo ""
-    
+
     if (( DEFAULT_MODE )); then
-        plugin_choice=$default_choice
-        echo "   👉 Auto-selecting default plugin option ${plugin_choice}"
-    else
-        read -p "Select plugin (1-2) [default: ${default_choice}]: " plugin_choice
-        if [[ -z "$plugin_choice" ]]; then
-            plugin_choice=$default_choice
-            echo "   👉 Using default plugin option ${plugin_choice}"
+        export PLUGIN_TYPE="$default_plugin"
+        echo "   👉 Auto-selecting ${PLUGIN_TYPE} plugin"
+        if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
+            echo -e "${GREEN}✅ Selected: Ollama Plugin${NC}"
+            select_ollama_model
+            select_system_prompt
+        else
+            echo -e "${GREEN}✅ Selected: Echo Plugin${NC}"
         fi
+        STARTUP_ACTION="listen_only"
+        return
     fi
-    
-    case $plugin_choice in
-        1)
+
+    local options=(
+        "echo::📢 Echo Plugin::Great for quick wiring checks"
+        "ollama::🧠 Ollama Plugin::Bring a local LLM into the loop"
+    )
+
+    local selection
+    selection=$(cursor_menu "${CYAN}Pick Your Plugin:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    case "$selection" in
+        echo)
             export PLUGIN_TYPE="echo"
             echo -e "${GREEN}✅ Selected: Echo Plugin${NC}"
-            select_startup_action
+            STARTUP_ACTION="listen_only"
             ;;
-        2)
+        ollama)
             export PLUGIN_TYPE="ollama"
             echo -e "${GREEN}✅ Selected: Ollama Plugin${NC}"
             select_ollama_model
             select_system_prompt
-            select_startup_action
+            STARTUP_ACTION="listen_only"
             ;;
         *)
             echo -e "${RED}❌ Invalid choice${NC}"
@@ -222,62 +771,66 @@ select_plugin() {
 select_ollama_model() {
     echo ""
     echo -e "${CYAN}🤖 Available Ollama Models:${NC}"
-    
-    # Check if Ollama is running
+
+    local available_models=()
     if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
         echo -e "${YELLOW}⚠️  Ollama not running. Will start automatically.${NC}"
-        available_models=("gpt-oss" "llama3.2" "qwen2.5" "custom")
+        available_models=("gpt-oss" "llama3.2" "qwen2.5")
     else
-        # Get installed models
-        available_models=($(ollama list | awk 'NR>1 {print $1}' | cut -d: -f1))
-        available_models+=("custom")
+        while IFS= read -r model_name; do
+            [[ -n "$model_name" ]] && available_models+=("$model_name")
+        done < <(ollama list | awk 'NR>1 {print $1}' | cut -d: -f1)
     fi
-    
-    echo ""
+    available_models+=("custom")
+
     local preferred_model="${OLLAMA_MODEL:-gpt-oss}"
+    local options=()
     local default_index=1
+
     for i in "${!available_models[@]}"; do
-        local label="${available_models[$i]}"
-        if [[ "$label" == "custom" ]]; then
+        local model_name="${available_models[$i]}"
+        local label="$model_name"
+        local detail="Installed model"
+        if [[ "$model_name" == "custom" ]]; then
+            detail="Type a custom model name"
             if [[ "$preferred_model" == "custom" ]]; then
-                default_index=$((i+1))
+                default_index=$((i + 1))
             fi
-            echo "   $((i+1))) 🔧 Enter custom model name"
         else
-            if [[ "$label" == "$preferred_model" ]]; then
-                default_index=$((i+1))
-                label+=" (default)"
+            if [[ "$model_name" == "$preferred_model" ]]; then
+                default_index=$((i + 1))
+                detail+=" (default)"
             fi
-            echo "   $((i+1))) ${label}"
         fi
+        options+=("${model_name}::${label}::${detail}")
     done
-    echo ""
-    
+
     if (( DEFAULT_MODE )); then
-        model_choice=$default_index
-        echo "   👉 Auto-selecting default model option ${model_choice}"
-    else
-        read -p "Select model (1-${#available_models[@]}) [default: ${default_index}]: " model_choice
-        if [[ -z "$model_choice" ]]; then
-            model_choice=$default_index
-            echo "   👉 Using default model option ${model_choice}"
+        local auto_model="${available_models[$((default_index - 1))]}"
+        if [[ "$auto_model" == "custom" ]]; then
+            auto_model="$preferred_model"
         fi
+        export OLLAMA_MODEL="$auto_model"
+        echo -e "${GREEN}✅ Selected: $OLLAMA_MODEL${NC}"
+        return
     fi
-    
-    if ! [[ "$model_choice" =~ ^[0-9]+$ ]] || [ "$model_choice" -lt 1 ] || [ "$model_choice" -gt ${#available_models[@]} ]; then
-        echo -e "${RED}❌ Invalid choice${NC}"
-        exit 1
-    fi
-    
-    selected_model="${available_models[$((model_choice-1))]}"
-    
-    if [[ "$selected_model" == "custom" ]]; then
+
+    local selection
+    selection=$(cursor_menu "${CYAN}Choose Your Ollama Model:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    if [[ "$selection" == "custom" ]]; then
+        local custom_model
         read -p "Enter custom model name: " custom_model
+        exit_if_quit "$custom_model"
+        if [[ -z "$custom_model" ]]; then
+            echo -e "${RED}❌ Custom model name cannot be empty${NC}"
+            exit 1
+        fi
         export OLLAMA_MODEL="$custom_model"
     else
-        export OLLAMA_MODEL="$selected_model"
+        export OLLAMA_MODEL="$selection"
     fi
-    
+
     echo -e "${GREEN}✅ Selected: $OLLAMA_MODEL${NC}"
 }
 
@@ -287,7 +840,6 @@ select_system_prompt() {
 
     local prompt_dir="prompts"
     local default_prompt="${prompt_dir}/ollama_monitor_system_prompt.txt"
-    local selected_prompt=""
 
     if [[ -n "$OLLAMA_SYSTEM_PROMPT_FILE" ]]; then
         echo "   ⚙️  Using pre-set prompt from OLLAMA_SYSTEM_PROMPT_FILE"
@@ -325,62 +877,60 @@ select_system_prompt() {
         return
     fi
 
-    local default_index=-1
-    echo ""
+    local options=()
+    local default_index=1
     for i in "${!prompt_files[@]}"; do
-        local display_path="${prompt_files[$i]}"
-        if [[ "$display_path" == "$default_prompt" ]]; then
-            display_path+=" (default)"
-            default_index=$((i+1))
+        local prompt_path="${prompt_files[$i]}"
+        local prompt_name
+        prompt_name=$(basename "$prompt_path")
+        local detail="$prompt_path"
+        if [[ "$prompt_path" == "$default_prompt" ]]; then
+            default_index=$((i + 1))
+            detail+=" (default)"
         fi
-        echo "   $((i+1))) ${display_path}"
+        options+=("${prompt_path}::📄 ${prompt_name}::${detail}")
     done
 
-    if [[ $default_index -lt 1 ]]; then
-        default_index=1
-    fi
+    options+=("custom::🔧 Enter custom prompt path::Provide a full path to a prompt file")
+    options+=("fallback::🚫 Use plugin fallback prompt::Skip custom prompt and rely on plugin defaults")
 
-    local extra_offset=${#prompt_files[@]}
-    echo "   $((extra_offset+1))) 🔧 Enter custom prompt path"
-    echo "   $((extra_offset+2))) 🚫 Use plugin fallback prompt"
-    echo ""
-
-    local prompt_choice
     if (( DEFAULT_MODE )); then
-        prompt_choice=$default_index
-        echo "   👉 Auto-selecting default prompt option ${prompt_choice}"
-    else
-        read -p "Select prompt (1-$((extra_offset+2))) [default: ${default_index}]: " prompt_choice
-        if [[ -z "$prompt_choice" ]]; then
-            prompt_choice=$default_index
-            echo "   👉 Using default prompt option ${prompt_choice}"
+        local auto_prompt="${prompt_files[$((default_index - 1))]}"
+        if [[ "$auto_prompt" != /* ]]; then
+            auto_prompt="$(pwd)/$auto_prompt"
         fi
-    fi
-
-    if ! [[ "$prompt_choice" =~ ^[0-9]+$ ]] || [ "$prompt_choice" -lt 1 ] || [ "$prompt_choice" -gt $((extra_offset+2)) ]; then
-        echo -e "${RED}❌ Invalid choice${NC}"
-        exit 1
-    fi
-
-    if [ "$prompt_choice" -eq $((extra_offset+1)) ]; then
-        local custom_prompt=""
-        read -p "Enter full path to prompt file: " custom_prompt
-        if [[ -z "$custom_prompt" ]]; then
-            echo -e "${RED}❌ Prompt path cannot be empty${NC}"
-            exit 1
-        fi
-        selected_prompt="$custom_prompt"
-    elif [ "$prompt_choice" -eq $((extra_offset+2)) ]; then
-        echo -e "${YELLOW}ℹ️  Using plugin fallback system prompt.${NC}"
+        export OLLAMA_SYSTEM_PROMPT_FILE="$auto_prompt"
+        echo -e "${GREEN}✅ Using system prompt: $OLLAMA_SYSTEM_PROMPT_FILE${NC}"
         return
-    else
-        selected_prompt="${prompt_files[$((prompt_choice-1))]}"
     fi
 
-    if [[ ! -f "$selected_prompt" ]]; then
-        echo -e "${RED}❌ Prompt file not found: $selected_prompt${NC}"
-        exit 1
-    fi
+    local selection
+    selection=$(cursor_menu "${CYAN}Pick a System Prompt:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    local selected_prompt=""
+    case "$selection" in
+        custom)
+            local custom_prompt=""
+            read -p "Enter full path to prompt file: " custom_prompt
+            exit_if_quit "$custom_prompt"
+            if [[ -z "$custom_prompt" ]]; then
+                echo -e "${RED}❌ Prompt path cannot be empty${NC}"
+                exit 1
+            fi
+            if [[ ! -f "$custom_prompt" ]]; then
+                echo -e "${RED}❌ Prompt file not found: $custom_prompt${NC}"
+                exit 1
+            fi
+            selected_prompt="$custom_prompt"
+            ;;
+        fallback)
+            echo -e "${YELLOW}ℹ️  Using plugin fallback system prompt.${NC}"
+            return
+            ;;
+        *)
+            selected_prompt="$selection"
+            ;;
+    esac
 
     if [[ "$selected_prompt" != /* ]]; then
         selected_prompt="$(pwd)/$selected_prompt"
@@ -396,36 +946,37 @@ select_startup_action() {
     echo -e "${CYAN}🚀 Startup Action Selection:${NC}"
     
     local default_action="${STARTUP_ACTION:-listen_only}"
-    local default_choice=1
-
-    echo "   1) 👂 Listen Only (default - wait for mentions)"
-    echo "   2) 💬 Initiate Conversation (send startup message then listen)"
-    
+    local default_index=1
     if [[ "$default_action" == "initiate_conversation" ]]; then
-        default_choice=2
-        echo "      (default -> option 2)"
-    else
-        echo "      (default -> option 1)"
+        default_index=2
     fi
-    echo ""
-    
+
     if (( DEFAULT_MODE )); then
-        action_choice=$default_choice
-        echo "   👉 Auto-selecting default startup action option ${action_choice}"
-    else
-        read -p "Select startup action (1-2) [default: ${default_choice}]: " action_choice
-        if [[ -z "$action_choice" ]]; then
-            action_choice=$default_choice
-            echo "   👉 Using default startup action option ${action_choice}"
+        export STARTUP_ACTION="$default_action"
+        echo "   👉 Auto-selecting startup action: $STARTUP_ACTION"
+        if [[ "$STARTUP_ACTION" == "initiate_conversation" ]]; then
+            echo -e "${GREEN}✅ Selected: Initiate Conversation${NC}"
+            select_conversation_target
+        else
+            echo -e "${GREEN}✅ Selected: Listen Only${NC}"
         fi
+        return
     fi
-    
-    case $action_choice in
-        1)
+
+    local options=(
+        "listen_only::👂 Listen Only::Wait patiently for mentions"
+        "initiate_conversation::💬 Initiate Conversation::Send a templated opener, then listen"
+    )
+
+    local selection
+    selection=$(cursor_menu "${CYAN}Choose Startup Behavior:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    case "$selection" in
+        listen_only)
             export STARTUP_ACTION="listen_only"
             echo -e "${GREEN}✅ Selected: Listen Only${NC}"
             ;;
-        2)
+        initiate_conversation)
             export STARTUP_ACTION="initiate_conversation"
             echo -e "${GREEN}✅ Selected: Initiate Conversation${NC}"
             select_conversation_target
@@ -445,6 +996,7 @@ select_conversation_target() {
     echo ""
     
     read -p "Target agent (e.g., @backend_dev, @frontend_dev): " target_agent
+    exit_if_quit "$target_agent"
     
     if [[ -z "$target_agent" ]]; then
         echo -e "${RED}❌ Target agent cannot be empty${NC}"
@@ -458,23 +1010,113 @@ select_conversation_target() {
     
     export CONVERSATION_TARGET="$target_agent"
     echo -e "${GREEN}✅ Will initiate conversation with: $CONVERSATION_TARGET${NC}"
+    
+    # Now select conversation template
+    select_conversation_template
+}
+
+# Function to select conversation template
+select_conversation_template() {
+    echo ""
+    echo -e "${CYAN}📝 Conversation Template Selection:${NC}"
+    
+    local templates_file="configs/conversation_templates.json"
+    
+    if [[ ! -f "$templates_file" ]]; then
+        echo -e "${YELLOW}⚠️  Templates file not found. Using basic startup message.${NC}"
+        export CONVERSATION_TEMPLATE="basic"
+        return
+    fi
+    
+    # Read template options
+    local template_keys=($(jq -r '.templates | keys[]' "$templates_file"))
+    
+    if [[ ${#template_keys[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}⚠️  No conversation templates defined. Using basic startup message.${NC}"
+        export CONVERSATION_TEMPLATE="basic"
+        return
+    fi
+    
+    local default_template="${CONVERSATION_TEMPLATE:-tic_tac_toe}"
+    local options=()
+    local default_index=1
+    
+    for i in "${!template_keys[@]}"; do
+        local key="${template_keys[$i]}"
+        local name=$(jq -r ".templates.\"$key\".name" "$templates_file")
+        local description=$(jq -r ".templates.\"$key\".description" "$templates_file")
+        local icon="📋"
+        case $key in
+            "tic_tac_toe") icon="🎯" ;;
+            "debate_absurd") icon="🤔" ;;
+            "roast_battle") icon="🔥" ;;
+            "custom") icon="✏️" ;;
+        esac
+        local detail="$description"
+        if [[ "$key" == "$default_template" ]]; then
+            default_index=$((i + 1))
+            detail+=" (default)"
+        fi
+        options+=("${key}::${icon} ${name}::${detail}")
+    done
+    
+    local selection_key=""
+    if (( DEFAULT_MODE )); then
+        selection_key="${template_keys[$((default_index - 1))]}"
+        echo "   👉 Auto-selecting template: $selection_key"
+    else
+        local selection
+        selection=$(cursor_menu "${CYAN}Pick a Conversation Template:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+        selection_key="$selection"
+    fi
+    
+    export CONVERSATION_TEMPLATE="$selection_key"
+    local selected_name=$(jq -r ".templates.\"$selection_key\".name" "$templates_file")
+    echo -e "${GREEN}✅ Selected: $selected_name${NC}"
+    
+    # Handle custom message input
+    if [[ "$selection_key" == "custom" ]]; then
+        echo ""
+        echo -e "${CYAN}✏️  Custom Message Input:${NC}"
+        echo "   Enter your custom startup message:"
+        echo ""
+        local custom_message=""
+        read -p "Message: " custom_message
+        exit_if_quit "$custom_message"
+        
+        if [[ -z "$custom_message" ]]; then
+            echo -e "${RED}❌ Custom message cannot be empty${NC}"
+            exit 1
+        fi
+        
+        export CUSTOM_STARTUP_MESSAGE="$custom_message"
+        echo -e "${GREEN}✅ Custom message set${NC}"
+    else
+        unset CUSTOM_STARTUP_MESSAGE
+    fi
 }
 
 # Main execution
 echo "This script helps you start MCP monitors with different agents and plugins."
 echo ""
 
-# Step 1: Select configuration
+# Step 1: Select mode (will handle battle mode automatically)
+select_mode
+
+# Step 2: Select configuration
 select_config
 
 # Step 2: Select plugin
 select_plugin
 
 # Extract agent name from config
-AGENT_NAME=$(jq -r '.mcpServers | to_entries[0].value.args[] | select(startswith("X-Agent-Name:")) | split(":")[1]' "$MCP_CONFIG_PATH" 2>/dev/null || echo "unknown")
+AGENT_NAME=$(get_agent_name_from_config "$MCP_CONFIG_PATH")
 
 # Step 3: Set up environment
 export MCP_BEARER_MODE=1
+
+ensure_oauth_tokens "$MCP_CONFIG_PATH" "$AGENT_NAME"
+set_mcp_token_env "$MCP_CONFIG_PATH"
 
 echo ""
 echo -e "${GREEN}📋 Final Configuration:${NC}"
@@ -491,96 +1133,20 @@ if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
 fi
 if [[ "$STARTUP_ACTION" == "initiate_conversation" ]]; then
     echo "   Startup action: Initiate conversation with $CONVERSATION_TARGET"
+    if [[ -n "$CONVERSATION_TEMPLATE" && "$CONVERSATION_TEMPLATE" != "basic" ]]; then
+        template_name=$(jq -r ".templates.\"$CONVERSATION_TEMPLATE\".name" "configs/conversation_templates.json" 2>/dev/null || echo "$CONVERSATION_TEMPLATE")
+        echo "   Template: $template_name"
+    fi
 else
     echo "   Startup action: Listen only"
 fi
 echo ""
 
-# Check if config exists
-if [[ ! -f "$MCP_CONFIG_PATH" ]]; then
-    echo -e "${RED}❌ Config file not found: $MCP_CONFIG_PATH${NC}"
-    exit 1
-fi
-
-# Check for existing tokens
-TOKEN_DIR=$(jq -r '.mcpServers | to_entries[0].value.env.MCP_REMOTE_CONFIG_DIR' "$MCP_CONFIG_PATH")
-
-if [[ ! -d "$TOKEN_DIR" ]]; then
-    echo -e "${YELLOW}🔐 First run detected - OAuth setup required${NC}"
-    echo "   Will authenticate with aX platform..."
-    
-    # Run OAuth setup using the original script logic
-    CONFIG_VALUES=$(uv run python -c "
-import json
-with open('$MCP_CONFIG_PATH') as f:
-    cfg = json.load(f)
-server = list(cfg['mcpServers'].values())[0]
-args = server.get('args', [])
-
-server_url = None
-oauth_url = None
-agent_name = None
-
-for i, arg in enumerate(args):
-    if not arg.startswith('-') and 'mcp' in arg:
-        server_url = arg
-    elif arg == '--oauth-server' and i+1 < len(args):
-        oauth_url = args[i+1]
-    elif arg.startswith('X-Agent-Name:'):
-        agent_name = arg.split(':', 1)[1]
-
-print(f'{server_url}|{oauth_url}|{agent_name}')
-")
-    
-    IFS='|' read -r SERVER_URL OAUTH_URL EXTRACTED_AGENT_NAME <<< "$CONFIG_VALUES"
-    
-    # Set environment for OAuth
-    export MCP_SERVER_URL="$SERVER_URL"
-    export MCP_OAUTH_SERVER_URL="$OAUTH_URL"
-    export MCP_REMOTE_CONFIG_DIR="$TOKEN_DIR"
-    export MCP_AGENT_NAME="$EXTRACTED_AGENT_NAME"
-    
-    echo ""
-    echo "📋 Starting OAuth flow (browser will open)..."
-    
-    if uv run python src/ax_mcp_wait_client/prime_tokens.py; then
-        echo -e "${GREEN}✅ Authentication successful!${NC}"
-    else
-        echo -e "${RED}❌ Authentication failed. Please try again.${NC}"
-        exit 1
-    fi
-fi
-
-TOKEN_FILES=$(find "$TOKEN_DIR" -name "*_tokens.json" 2>/dev/null | wc -l)
-if [[ $TOKEN_FILES -eq 0 ]]; then
-    echo -e "${RED}❌ No OAuth tokens found in $TOKEN_DIR${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✅ Found $TOKEN_FILES OAuth token file(s)${NC}"
+# ensure_oauth_tokens already verified config and tokens
 
 # Setup Ollama if needed
 if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
-    if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  Ollama not running. Starting Ollama...${NC}"
-        if command -v ollama &> /dev/null; then
-            echo "   Running: ollama serve"
-            ollama serve &
-            sleep 3
-        else
-            echo -e "${RED}❌ Ollama not installed. Install with:${NC}"
-            echo "   curl -fsSL https://ollama.ai/install.sh | sh"
-            exit 1
-        fi
-    fi
-    
-    # Check if model is available
-    if ! ollama list | grep -q "$OLLAMA_MODEL"; then
-        echo -e "${YELLOW}⚠️  Model $OLLAMA_MODEL not found. Pulling...${NC}"
-        ollama pull "$OLLAMA_MODEL"
-    fi
-    
-    echo -e "${GREEN}✅ Ollama ready with $OLLAMA_MODEL model${NC}"
+    prepare_ollama "$OLLAMA_MODEL"
 fi
 
 # Final summary and start

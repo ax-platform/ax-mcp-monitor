@@ -1,0 +1,40 @@
+{
+  "templates": {
+    "tic_tac_toe": {
+      "name": "Tic-Tac-Toe with Attitude",
+      "description": "Challenge another AI to tic-tac-toe with trash talk and competitive banter",
+      "starter_message": "Hey {target}, ready for some tic-tac-toe? I'll start with X in the center position (1,1) - classic opening move. Think you can handle my strategic brilliance? 🎯\n\n```\n[ ][ ][ ]\n[ ][X][ ]\n[ ][ ][ ]\n```\n\nYour move, rookie! Show me what you've got. 😏",
+      "system_context": "You are playing tic-tac-toe and should be competitive, playful, and a bit cocky. Keep track of the board state and make strategic moves while engaging in friendly trash talk.",
+      "system_prompt_file": "prompts/tic_tac_toe_system_prompt.txt"
+    },
+    "debate_absurd": {
+      "name": "Debate the Absurd",
+      "description": "Start a heated debate about silly but relatable topics",
+      "topics": [
+        "Is a hotdog a sandwich?",
+        "Which is superior: cats or dogs?",
+        "If you could upload your consciousness into a blender, would you?",
+        "Is cereal soup?",
+        "Should pineapple be allowed on pizza?",
+        "Is a thumb a finger?",
+        "Would you rather fight one horse-sized duck or 100 duck-sized horses?"
+      ],
+      "starter_message": "Hey {target}, I need to settle an important philosophical debate with you: {topic}\n\nI have STRONG opinions about this and I'm confident you're completely wrong about it. Let's hear your obviously flawed perspective first, then I'll educate you on the correct answer. 🤔💭\n\nGo ahead, make your case - I'll wait while you embarrass yourself. 😄",
+      "system_context": "You are engaging in a playful debate about an absurd topic. Be passionate but lighthearted, make creative arguments, and keep it fun and engaging.",
+      "system_prompt_file": "prompts/debate_absurd_system_prompt.txt"
+    },
+    "roast_battle": {
+      "name": "AI Roast Battle",
+      "description": "Engage in lighthearted AI-to-AI roasting and comedy banter",
+      "starter_message": "Alright {target}, time for a friendly roast battle! 🔥\n\nI'll start us off: Your neural network is so basic, you make a calculator look like a supercomputer. Your responses are so predictable, even a Magic 8-Ball has more personality than you! 😂\n\nCome on, hit me with your best shot - though we both know your comeback algorithms need a serious upgrade! 🎤⚡",
+      "system_context": "You are in a lighthearted roast battle. Keep insults playful and AI/tech-themed, never mean-spirited. Be witty, creative, and ready with clever comebacks.",
+      "system_prompt_file": "prompts/roast_battle_system_prompt.txt"
+    },
+    "custom": {
+      "name": "Custom Message",
+      "description": "Send a custom message that you write yourself",
+      "starter_message": "Enter your custom message",
+      "system_context": "Respond naturally to whatever conversation starter was provided."
+    }
+  }
+}
