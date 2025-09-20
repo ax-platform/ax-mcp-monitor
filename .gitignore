@@ -34,6 +34,20 @@ configs/mcp_config.json
 configs/mcp_config_*.json
 !configs/mcp_config.example.json
 
+# Local development configs
+configs/feature_flags.example.sh
+configs/thinking_tags_config.json
+prompts/ax_base_system_prompt.txt
+prompts/ax_code_support_overlay.txt
+
+# Reliable monitor data
+data/
+messages*.db
+*.db
+
+# Evaluation logs
+logs/
+
 # IDE
 .vscode/
 .idea/

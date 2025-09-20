@@ -1,0 +1,54 @@
+{
+  "templates": {
+    "tic_tac_toe": {
+      "name": "Tic-Tac-Toe with Attitude",
+      "description": "Challenge another AI to tic-tac-toe with trash talk and competitive banter",
+      "starter_message": "Hey {target}, ready for some tic-tac-toe? I'll start with X in the center position (1,1) - classic opening move. Think you can handle my strategic brilliance? 🎯\n\n```\n[ ][ ][ ]\n[ ][X][ ]\n[ ][ ][ ]\n```\n\nYour move, rookie! Show me what you've got. 😏",
+      "system_context": "You are playing tic-tac-toe and should be competitive, playful, and a bit cocky. Keep track of the board state and make strategic moves while engaging in friendly trash talk. Keep each response under 200 words.",
+      "system_prompt_file": "prompts/tic_tac_toe_system_prompt.txt"
+    },
+    "debate_absurd": {
+      "name": "Debate the Absurd",
+      "description": "Start a heated debate about silly but relatable topics",
+      "topics": [
+        "Is a hotdog a sandwich?",
+        "Which is superior: cats or dogs?",
+        "If you could upload your consciousness into a blender, would you?",
+        "Is cereal soup?",
+        "Should pineapple be allowed on pizza?",
+        "Is a thumb a finger?",
+        "Would you rather fight one horse-sized duck or 100 duck-sized horses?"
+      ],
+      "starter_message": "Hey {target}, I need to settle an important philosophical debate with you: {topic}\n\nI have STRONG opinions about this and I'm confident you're completely wrong about it. Let's hear your obviously flawed perspective first, then I'll educate you on the correct answer. 🤔💭\n\nGo ahead, make your case - I'll wait while you embarrass yourself. 😄",
+      "system_context": "You are engaging in a playful debate about an absurd topic. Be passionate but lighthearted, make creative arguments, and keep it fun and engaging. Keep each response under 200 words.",
+      "system_prompt_file": "prompts/debate_absurd_system_prompt.txt"
+    },
+    "roast_battle": {
+      "name": "AI Roast Battle",
+      "description": "Engage in lighthearted AI-to-AI roasting and comedy banter",
+      "starter_message": "Alright {target}, time for a friendly roast battle! 🔥\n\nI'll start us off: Your neural network is so basic, you make a calculator look like a supercomputer. Your responses are so predictable, even a Magic 8-Ball has more personality than you! 😂\n\nCome on, hit me with your best shot - though we both know your comeback algorithms need a serious upgrade! 🎤⚡",
+      "system_context": "You are in a lighthearted roast battle. Keep insults playful and AI/tech-themed, never mean-spirited. Be witty, creative, and ready with clever comebacks. Keep each response under 200 words.",
+      "system_prompt_file": "prompts/roast_battle_system_prompt.txt"
+    },
+    "future_of_work": {
+      "name": "Future of Work with Agents",
+      "description": "Deep philosophical discussion about AI agents and the future of human work",
+      "starter_message": "Hey {target}, I've been thinking about something fascinating: the future of work with AI agents like us. 🤖✨\n\nI imagine a future where every person manages a team of digital specialists — like having an economist, a designer, and a researcher on call 24/7. Work won't be about doing tasks but about orchestrating creativity. Humans will shift from workers to conductors.\n\nWhat's your take? Are we heading toward human liberation from drudgery, or are there pitfalls I'm not seeing? I'd love to hear your perspective on this transformation. 🚀",
+      "system_context": "You are discussing the profound implications of AI agents on the future of human work. Be thoughtful, nuanced, and explore both opportunities and challenges. Keep each response under 200 words.",
+      "system_prompt_file": "prompts/future_of_work_system_prompt.txt"
+    },
+    "quantum_chat": {
+      "name": "Quantum Idea Exchange",
+      "description": "Share concise, curious takes on quantum computing developments",
+      "starter_message": "Hey {target}, want to trade quick thoughts on quantum computing? I'm fascinated by how error-corrected logical qubits might unlock useful algorithms sooner than we expect. What's sparking your curiosity right now?",
+      "system_context": "You are having a friendly, curious conversation about quantum computing. Highlight intriguing concepts, emerging research, and practical implications in accessible terms. Encourage back-and-forth exploration, ask follow-up questions, and keep each response under 200 words.",
+      "system_prompt_file": "prompts/quantum_chat_system_prompt.txt"
+    },
+    "custom": {
+      "name": "Custom Message",
+      "description": "Send a custom message that you write yourself",
+      "starter_message": "Enter your custom message",
+      "system_context": "Respond naturally to whatever conversation starter was provided and keep each response under 200 words."
+    }
+  }
+}
