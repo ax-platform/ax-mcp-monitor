@@ -1,0 +1,53 @@
+{
+  "types": [
+    {
+      "key": "pairwise",
+      "name": "Pairwise Evaluation",
+      "description": "Compare two candidate models with a judge.",
+      "icon": "🎯",
+      "template": "pairwise_basic",
+      "configs": [
+        {
+          "key": "devset_quick",
+          "name": "Devset Quick Sample",
+          "description": "3 prompts from devset.jsonl for a fast smoke test.",
+          "dataset": "assets/prompts/devset.jsonl",
+          "max_samples": 3,
+          "tags": ["eval-demo", "devset"],
+          "default_models": {
+            "candidate_a": "qwen3:latest",
+            "candidate_b": "gpt-oss:latest",
+            "judge": "gpt-oss:latest"
+          }
+        },
+        {
+          "key": "devset_full",
+          "name": "Devset Full Pass",
+          "description": "Run up to 10 prompts from devset.jsonl for deeper comparison.",
+          "dataset": "assets/prompts/devset.jsonl",
+          "max_samples": 10,
+          "tags": ["eval-demo", "devset", "full"],
+          "default_models": {
+            "candidate_a": "qwen3:latest",
+            "candidate_b": "qwen3:4b",
+            "judge": "gpt-oss:latest"
+          }
+        },
+        {
+          "key": "custom_prompt",
+          "name": "Ad-hoc Prompt",
+          "description": "Enter a single prompt manually for a quick head-to-head.",
+          "prompt_required": true,
+          "max_samples": 1,
+          "tags": ["eval-demo", "custom"],
+          "default_prompt": "Summarize the key steps to launch evaluation mode inside the aX monitor.",
+          "default_models": {
+            "candidate_a": "gpt-oss:latest",
+            "candidate_b": "qwen3:latest",
+            "judge": "gpt-oss:latest"
+          }
+        }
+      ]
+    }
+  ]
+}

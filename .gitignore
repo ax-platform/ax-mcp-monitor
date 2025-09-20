@@ -45,6 +45,9 @@ data/
 messages*.db
 *.db
 
+# Evaluation logs
+logs/
+
 # IDE
 .vscode/
 .idea/

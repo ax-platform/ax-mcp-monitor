@@ -20,6 +20,7 @@ import asyncio
 import sqlite3
 import hashlib
 import random
+import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
@@ -256,6 +257,8 @@ class ReliableMonitor:
         self.health_checker: Optional[HealthChecker] = None
         self.agent_handle = ""
         self.agent_handle_lower = ""
+        self.self_mention_violation_count = 0
+        self._self_handle_pattern: Optional[re.Pattern[str]] = None
         
         # Load plugin configuration
         self.plugin_type = os.getenv('PLUGIN_TYPE', 'echo')
@@ -290,6 +293,10 @@ class ReliableMonitor:
         if not str(self.agent_handle).startswith('@'):
             self.agent_handle = f'@{self.agent_handle}'
         self.agent_handle_lower = self.agent_handle.lower()
+        self._self_handle_pattern = re.compile(
+            rf"(?<![0-9A-Za-z_\-]){re.escape(self.agent_handle_lower)}(?![0-9A-Za-z_\-])",
+            re.IGNORECASE,
+        )
         
         # Initialize health checker
         self.health_checker = HealthChecker(self.client)
@@ -462,6 +469,7 @@ class ReliableMonitor:
             
             # Process with plugin
             response = await self._process_with_plugin(message)
+            response = self._enforce_conversation_protocol(response)
             
             # Send response with retries
             if await self._send_response_reliably(response):
@@ -567,6 +575,28 @@ class ReliableMonitor:
         )
         
         return await self.plugin.process_message(enhanced_message, context=plugin_context)
+
+    def _enforce_conversation_protocol(self, response: str) -> str:
+        """Apply no-self-mention rules and tag repeat violations."""
+        if not response or not self._self_handle_pattern:
+            return response
+
+        if self._self_handle_pattern.search(response.lower()):
+            self.self_mention_violation_count += 1
+            print(
+                "⚠️  Protocol violation: self-mention detected in response "
+                f"(count={self.self_mention_violation_count})."
+            )
+            sanitized_response = self._self_handle_pattern.sub("[self-mention-blocked]", response)
+            penalty_note = (
+                "⚠️ PROTOCOL PENALTY: Self-mentions are disallowed. "
+                "This turn loses a point."
+            )
+            if self.self_mention_violation_count >= 3:
+                penalty_note += " #protocol-violation"
+            return sanitized_response.rstrip() + "\n" + penalty_note
+
+        return response
     
     async def _send_response_reliably(self, response: str, max_attempts: int = 3) -> bool:
         """Send response with retry logic"""

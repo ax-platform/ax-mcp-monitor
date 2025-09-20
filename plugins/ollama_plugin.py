@@ -56,6 +56,35 @@ def _ensure_sender_prefix(reply: str, sender: Optional[str]) -> str:
     stripped = cleaned.lstrip("-–—: ")
     return f"{normalized} — {stripped}"
 
+def _contains_handle(text: str, handle: Optional[str]) -> bool:
+    """Return True if the exact handle appears as an @mention in the text."""
+    if not text or not handle:
+        return False
+    handle_lower = handle.lower()
+    for mention in MENTION_PATTERN.findall(text):
+        if mention.lower() == handle_lower:
+            return True
+    return False
+
+
+def _normalize_handle_value(handle: Optional[str]) -> Optional[str]:
+    """Normalize arbitrary handle strings to a canonical @mention."""
+    if not handle:
+        return None
+    token = str(handle).strip()
+    if not token:
+        return None
+    if not token.startswith("@"):
+        token = f"@{token}"
+    first_word = token.split()[0]
+    mention_match = MENTION_PATTERN.search(first_word)
+    if mention_match:
+        return mention_match.group(0)
+    cleaned = re.sub(r"[^@0-9A-Za-z_\-]", "", first_word)
+    if cleaned.startswith("@") and len(cleaned) > 1:
+        return cleaned
+    return None
+
 
 class OllamaPlugin(BasePlugin):
     """Plugin that uses Ollama for LLM responses."""
@@ -264,6 +293,37 @@ class OllamaPlugin(BasePlugin):
         agent_name = metadata.get("agent_name")
 
         normalized_sender = _normalize_sender(sender)
+
+        ignore_mentions_raw = metadata.get("ignore_mentions") or []
+        if isinstance(ignore_mentions_raw, str):
+            ignore_mentions_raw = [ignore_mentions_raw]
+        ignore_mentions = {
+            handle.lower()
+            for handle in (
+                _normalize_handle_value(entry) for entry in ignore_mentions_raw
+            )
+            if handle
+        }
+        if normalized_sender and normalized_sender.lower() in ignore_mentions:
+            normalized_sender = None
+
+        required_mentions: list[str] = []
+        required_raw = metadata.get("required_mentions")
+        if isinstance(required_raw, str):
+            required_candidates = [required_raw]
+        elif isinstance(required_raw, (list, tuple, set)):
+            required_candidates = list(required_raw)
+        else:
+            required_candidates = []
+        for candidate in required_candidates:
+            normalized = _normalize_handle_value(candidate)
+            if not normalized:
+                continue
+            if normalized.lower() in ignore_mentions:
+                continue
+            if normalized not in required_mentions:
+                required_mentions.append(normalized)
+
         prompt_sender = normalized_sender or (sender.strip() if isinstance(sender, str) else None)
 
         # Blend sender info into the conversation history so the LLM knows who spoke.
@@ -282,9 +342,9 @@ class OllamaPlugin(BasePlugin):
         stream_handler = metadata.get("stream_handler")
         loop = asyncio.get_running_loop()
 
-        def _invoke_model() -> str:
+        def _invoke_model(active_handler) -> str:
             try:
-                if stream_handler:
+                if active_handler:
                     accumulated: list[str] = []
                     response = self.client.chat.completions.create(
                         model=self.model,
@@ -298,49 +358,93 @@ class OllamaPlugin(BasePlugin):
                             continue
                         accumulated.append(piece)
                         try:
-                            future = asyncio.run_coroutine_threadsafe(stream_handler(piece), loop)
+                            future = asyncio.run_coroutine_threadsafe(active_handler(piece), loop)
                             future.result()
                         except Exception:
                             # Ignore streaming handler errors to avoid blocking reply generation
                             pass
                     return "".join(accumulated)
-                else:
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=self.messages_history,
-                        timeout=45,
-                    )
-                    return response.choices[0].message.content
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=self.messages_history,
+                    timeout=45,
+                )
+                return response.choices[0].message.content
             except Exception as exc:
                 raise exc
 
-        try:
-            raw_reply = await asyncio.to_thread(_invoke_model)
-        except Exception as e:
-            return f"Error calling Ollama: {e}"
+        agent_handle_normalized: Optional[str] = None
+        if agent_name:
+            agent_handle_normalized = agent_name if str(agent_name).startswith('@') else f'@{agent_name}'
 
-        # Get the response and process thinking tags
-        reply = raw_reply or ""
+        if not required_mentions and normalized_sender:
+            if not (agent_handle_normalized and normalized_sender.lower() == agent_handle_normalized.lower()):
+                required_mentions.append(normalized_sender)
 
-        # Fix curly brace mentions: @{username} -> @username
-        reply = re.sub(r'@\{([^}]+)\}', r'@\1', reply)
+        mention_retry_limit = int(os.getenv('OLLAMA_MENTION_RETRY_LIMIT', '2'))
+        attempts = 0
+        reminders_used = 0
+        final_reply = ""
 
-        # Fix spaced mentions: @ username -> @username
-        reply = re.sub(r'@\s+([A-Za-z0-9_]+)', r'@\1', reply)
-        
-        # Process thinking tags according to configuration
-        reply = self._process_thinking_tags(reply)
-        
+        while True:
+            attempts += 1
+            current_handler = stream_handler if attempts == 1 else None
+            try:
+                raw_reply = await asyncio.to_thread(_invoke_model, current_handler)
+            except Exception as e:
+                return f"Error calling Ollama: {e}"
+
+            reply = raw_reply or ""
+
+            # Fix curly brace mentions: @{username} -> @username
+            reply = re.sub(r'@\{([^}]+)\}', r'@\1', reply)
+
+            # Fix spaced mentions: @ username -> @username
+            reply = re.sub(r'@\s+([A-Za-z0-9_]+)', r'@\1', reply)
+
+            # Process thinking tags according to configuration
+            reply = self._process_thinking_tags(reply)
+
+            trimmed_reply = reply.strip()
+            missing_mentions = [
+                handle for handle in required_mentions if not _contains_handle(reply, handle)
+            ]
+            mention_satisfied = not missing_mentions
+            hash_opt_out = trimmed_reply.startswith('#')
+
+            if mention_satisfied or hash_opt_out:
+                final_reply = reply
+                break
+
+            handles_text = ", ".join(missing_mentions) or "(unspecified handles)"
+
+            if reminders_used >= mention_retry_limit:
+                print(
+                    f"⚠️ Ollama reply missing required mention(s) {handles_text}; "
+                    f"sending as-is after {attempts} attempts."
+                )
+                final_reply = reply
+                break
+
+            reminders_used += 1
+            print(f"🔁 Ollama retry {reminders_used}: reinforcing mention requirement for {handles_text}.")
+            reminder_prompt = (
+                "Please rewrite your previous reply so it naturally includes the following handles: "
+                f"{handles_text}. Stay on topic and keep the tone consistent."
+            )
+            self.messages_history.append({"role": "user", "content": reminder_prompt})
+            continue
+
         if self.auto_mention:
-            reply = _ensure_sender_prefix(reply, normalized_sender)
-        self.messages_history.append({"role": "assistant", "content": reply})
-        
+            final_reply = _ensure_sender_prefix(final_reply, normalized_sender)
+        self.messages_history.append({"role": "assistant", "content": final_reply})
+
         # Keep conversation history manageable
         if len(self.messages_history) > (self.max_history * 2 + 1):  # system + N exchanges
             # Keep system message and last N exchanges
             self.messages_history[1:] = self.messages_history[-(self.max_history * 2):]
-        
-        return reply
+
+        return final_reply
     
     def reset_context(self):
         """Reset conversation history, keeping only system prompt."""
