@@ -63,3 +63,5 @@ NOTES.md
 AGENTS.md
 GEMINI.md
 configs/mcp_config_prod.json
+.env
+.pycache/

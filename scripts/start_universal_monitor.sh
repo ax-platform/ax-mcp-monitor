@@ -8,6 +8,13 @@
 
 set -e
 
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
+
 DEFAULT_MODE=0
 FORWARD_ARGS=()
 MODE_SELECTION=""
@@ -626,6 +633,8 @@ apply_system_prompt_env() {
 
     unset OLLAMA_SYSTEM_PROMPT
     unset OLLAMA_SYSTEM_PROMPT_FILE
+    unset OPENROUTER_SYSTEM_PROMPT
+    unset OPENROUTER_SYSTEM_PROMPT_FILE
 
     combined=$(compose_system_prompt "$BASE_SYSTEM_PROMPT_PATH" "$inline_scenario" "$scenario_path")
 
@@ -667,12 +676,16 @@ apply_system_prompt_env() {
     if [[ -n "$combined" ]]; then
         printf -v OLLAMA_SYSTEM_PROMPT "%s" "$combined"
         export OLLAMA_SYSTEM_PROMPT
+        printf -v OPENROUTER_SYSTEM_PROMPT "%s" "$combined"
+        export OPENROUTER_SYSTEM_PROMPT
         LAST_SYSTEM_PROMPT_TEXT="$combined"
     elif [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_SYSTEM_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export OPENROUTER_SYSTEM_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
         LAST_SYSTEM_PROMPT_TEXT=$(read_prompt_file "$BASE_SYSTEM_PROMPT_PATH")
     elif [[ -n "$scenario_path" && -f "$scenario_path" ]]; then
         export OLLAMA_SYSTEM_PROMPT_FILE="$scenario_path"
+        export OPENROUTER_SYSTEM_PROMPT_FILE="$scenario_path"
         LAST_SYSTEM_PROMPT_TEXT=$(read_prompt_file "$scenario_path")
     fi
 }
@@ -915,8 +928,10 @@ run_ai_battle_mode() {
 
     if [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export OPENROUTER_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
     else
         unset OLLAMA_BASE_PROMPT_FILE
+        unset OPENROUTER_BASE_PROMPT_FILE
     fi
 
     if ! prepare_ollama "$OLLAMA_MODEL"; then
@@ -1668,6 +1683,7 @@ select_single_agent_behavior() {
     local options=(
         "monitor::🧠 Ollama Monitor Mode::LLM monitors for a mention in aX"
         "kickoff::🗣️ Ollama Conversation Mode::Trigger a short conversation, then keep listening"
+        "openrouter::🌐 OpenRouter Monitor Mode::Use OpenRouter-hosted completions (e.g., Grok 4 Fast)"
     )
 
     local selection
@@ -1691,6 +1707,17 @@ select_single_agent_behavior() {
             export PLUGIN_TYPE="ollama"
             echo -e "${GREEN}✅ Selected: Ollama Conversation Mode${NC}"
             if ! select_ollama_model; then
+                return 1
+            fi
+            select_system_prompt
+            STARTUP_ACTION="listen_only"
+            ;;
+        openrouter)
+            SINGLE_AGENT_BEHAVIOR="monitor"
+            CONVERSATION_MODE=0
+            export PLUGIN_TYPE="openrouter"
+            echo -e "${GREEN}✅ Selected: OpenRouter Monitor Mode${NC}"
+            if ! select_openrouter_model; then
                 return 1
             fi
             select_system_prompt
@@ -1836,6 +1863,41 @@ select_ollama_model() {
     local resolved_value="${!target_var}"
     export "$target_var=$resolved_value"
     echo -e "${GREEN}✅ Selected: $resolved_value${NC}"
+    return 0
+}
+
+select_openrouter_model() {
+    local target_var=${1:-OPENROUTER_MODEL}
+    local menu_title=${2:-${CYAN}Choose Your OpenRouter Model:${NC}}
+    local default_model=${3:-$(printf "%s" "${OPENROUTER_MODEL:-x-ai/grok-4-fast:free}")}
+
+    if (( DEFAULT_MODE )); then
+        printf -v "$target_var" "%s" "$default_model"
+        local resolved="${!target_var}"
+        export "$target_var=$resolved"
+        echo -e "${GREEN}✅ Selected: $resolved${NC}"
+        return 0
+    fi
+
+    echo ""
+    echo -e "$menu_title"
+    echo "   Press Enter to accept the default. Use ';' to chain multiple presses is not required."
+    echo "   Popular choices:"
+    echo "     • x-ai/grok-4-fast:free (fast Grok tier on OpenRouter)"
+    echo "     • openrouter/auto (auto-select best route)"
+    echo "     • anthropic/claude-3.5-sonnet (if enabled on your key)"
+
+    local selection
+    read -p "   OpenRouter model [${default_model}]: " selection
+    exit_if_quit "$selection"
+    if [[ -z "$selection" ]]; then
+        selection="$default_model"
+    fi
+
+    printf -v "$target_var" "%s" "$selection"
+    local resolved="${!target_var}"
+    export "$target_var=$resolved"
+    echo -e "${GREEN}✅ Selected: $resolved${NC}"
     return 0
 }
 
@@ -2129,6 +2191,7 @@ reset_session_state() {
     PLUGIN_TYPE=""
     unset MCP_CONFIG_PATH AGENT_NAME AGENT_HANDLE AGENT_EMOJI
     unset OLLAMA_MODEL OLLAMA_SYSTEM_PROMPT OLLAMA_SYSTEM_PROMPT_FILE OLLAMA_BASE_PROMPT_FILE
+    unset OPENROUTER_MODEL OPENROUTER_SYSTEM_PROMPT OPENROUTER_SYSTEM_PROMPT_FILE OPENROUTER_BASE_PROMPT_FILE
     unset CUSTOM_STARTUP_MESSAGE CONVERSATION_TARGET CONVERSATION_TEMPLATE
     unset SESSION_TAG_PRIMARY SESSION_TAGS SESSION_TAG_DISPLAY SESSION_ANNOUNCEMENT
     CONVERSATION_SYSTEM_PROMPT_PATH=""
@@ -2221,8 +2284,10 @@ if [[ "$MODE_SELECTION" == "single" && "$CONVERSATION_MODE" -eq 1 ]]; then
     echo -e "${CYAN}💬 Sending kickoff message before starting monitor...${NC}"
     if [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export OPENROUTER_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
     else
         unset OLLAMA_BASE_PROMPT_FILE
+        unset OPENROUTER_BASE_PROMPT_FILE
     fi
     kickoff_args=("scripts/moderator_prompt_example.py" "$AGENT_HANDLE" "$CONVERSATION_TARGET" "--template" "$CONVERSATION_TEMPLATE" "--plugin" "ollama" "--send" "--config" "$MCP_CONFIG_PATH")
     if [[ -n "$OLLAMA_MODEL" ]]; then
@@ -2252,7 +2317,15 @@ else
         echo "   Behavior: monitor"
     fi
     echo "   Plugin: $PLUGIN_TYPE"
-    echo "   Model: $OLLAMA_MODEL"
+    monitor_model=""
+    if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
+        monitor_model="$OLLAMA_MODEL"
+    elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
+        monitor_model="$OPENROUTER_MODEL"
+    fi
+    if [[ -n "$monitor_model" ]]; then
+        echo "   Model: $monitor_model"
+    fi
     print_system_prompt_details "   " "$LAST_SYSTEM_PROMPT_SOURCE" "$LAST_SYSTEM_PROMPT_TEXT"
     if [[ "$CONVERSATION_MODE" -eq 1 ]]; then
         echo "   Kickoff target: $CONVERSATION_TARGET"
@@ -2280,9 +2353,13 @@ echo ""
 echo -e "${BLUE}🎯 Starting MCP Monitor...${NC}"
 echo "   Listening for ${AGENT_EMOJI} $AGENT_HANDLE mentions"
 echo "   Mode: $MODE_SELECTION"
+echo "   Plugin: $PLUGIN_TYPE"
 if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
-    echo "   Plugin: $PLUGIN_TYPE"
     echo "   Model: $OLLAMA_MODEL"
+elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
+    echo "   Model: $OPENROUTER_MODEL"
+fi
+if [[ "$MODE_SELECTION" != "echo" ]]; then
     print_system_prompt_details "   " "$LAST_SYSTEM_PROMPT_SOURCE" "$LAST_SYSTEM_PROMPT_TEXT"
 fi
 echo "   Press Ctrl+C to stop"
