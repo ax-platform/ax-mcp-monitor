@@ -68,38 +68,10 @@ strings_equal_ci() {
     [[ "$left" == "$right" ]]
 }
 
-generate_tag_suggestion_bundle() {
-    local desired_count=2
-    local -a picks=()
-    local attempt=0
-    local max_attempts=20
-
-    while (( ${#picks[@]} < desired_count && attempt < max_attempts )); do
-        local candidate
-        candidate=$(generate_session_codename)
-        ((attempt++))
-
-        local duplicate=0
-        for existing in "${picks[@]}"; do
-            if strings_equal_ci "$existing" "$candidate"; then
-                duplicate=1
-                break
-            fi
-        done
-        if (( duplicate )); then
-            continue
-        fi
-
-        picks+=("$candidate")
-    done
-
-    if (( ${#picks[@]} == 0 )); then
-        picks+=("$(generate_session_codename)")
-    fi
-
-    local joined
-    joined=$(IFS=';'; echo "${picks[*]}")
-    printf "%s" "$joined"
+generate_tag_suggestion() {
+    local suggestion
+    suggestion=$(generate_session_codename)
+    printf "%s" "$suggestion"
 }
 
 sanitize_tag_token() {
@@ -127,20 +99,17 @@ sanitize_tag_token() {
 configure_session_tags() {
     unset SESSION_TAG_PRIMARY SESSION_TAGS SESSION_TAG_DISPLAY
 
-    local suggestion_bundle
-    suggestion_bundle=$(generate_tag_suggestion_bundle)
-    local -a suggestion_tokens=()
-    IFS=';' read -ra suggestion_tokens <<< "$suggestion_bundle"
-    local suggestion_display=${suggestion_bundle//;/ }
+    local suggested_tag
+    suggested_tag=$(generate_tag_suggestion)
 
     echo ""
     echo -e "${CYAN}🏷️  Session Tag Setup:${NC}"
     echo "   Tags are optional, but they make filtering in aX easier."
     local tag_prompt="   Session tags (optional - press Enter to skip"
-    if [[ -n "$suggestion_bundle" ]]; then
-        tag_prompt+="; '.' to use ${suggestion_display}"
+    if [[ -n "$suggested_tag" ]]; then
+        tag_prompt+="; '.' to accept ${suggested_tag}"
     fi
-    tag_prompt+="): "
+    tag_prompt+="; custom tags separated by ';'): "
 
     local tag_input_raw
     read -p "$tag_prompt" tag_input_raw
@@ -153,12 +122,12 @@ configure_session_tags() {
 
     local normalized_input="$tag_input_raw"
     if [[ "$tag_input_raw" == "." ]]; then
-        normalized_input="$suggestion_bundle"
-        echo "   Using suggested tags: ${suggestion_display}"
+        normalized_input="$suggested_tag"
+        echo "   Using suggested tag: ${suggested_tag}"
     fi
 
-    local normalized_tokens=${normalized_input//,/;}
-    IFS=';' read -ra tag_tokens <<< "$normalized_tokens"
+    normalized_input=${normalized_input//,/;}
+    IFS=';' read -ra tag_tokens <<< "$normalized_input"
 
     local -a tags=()
     for token in "${tag_tokens[@]}"; do
@@ -182,33 +151,19 @@ configure_session_tags() {
     done
 
     if (( ${#tags[@]} == 0 )); then
-        for token in "${suggestion_tokens[@]}"; do
-            [[ -z "$token" ]] && continue
+        if [[ -n "$suggested_tag" ]]; then
             local sanitized_suggestion
-            sanitized_suggestion=$(sanitize_tag_token "$token")
-            if [[ -z "$sanitized_suggestion" ]]; then
-                continue
-            fi
-
-            local duplicate=0
-            for existing in "${tags[@]}"; do
-                if strings_equal_ci "$existing" "$sanitized_suggestion"; then
-                    duplicate=1
-                    break
-                fi
-            done
-
-            if (( ! duplicate )); then
+            sanitized_suggestion=$(sanitize_tag_token "$suggested_tag")
+            if [[ -n "$sanitized_suggestion" ]]; then
                 tags+=("$sanitized_suggestion")
+                echo "   No valid tags parsed, falling back to suggested tag."
             fi
-        done
+        fi
 
         if (( ${#tags[@]} == 0 )); then
             echo -e "${YELLOW}ℹ️  No valid tags entered; skipping session tags.${NC}"
             return
         fi
-
-        echo "   No valid tags parsed, falling back to suggested tags."
     fi
 
     local joined_csv
@@ -1986,82 +1941,7 @@ select_system_prompt() {
     echo -e "${GREEN}✅ Base system prompt set to: $BASE_SYSTEM_PROMPT_PATH${NC}"
 
     ADDITIONAL_PROMPT_PATHS=()
-
-    if (( DEFAULT_MODE )); then
-        return
-    fi
-
-    local extra_candidates=()
-    local extra_labels=()
-    for prompt_path in "${prompt_files[@]}"; do
-        if [[ "$prompt_path" == "$BASE_SYSTEM_PROMPT_PATH" ]]; then
-            continue
-        fi
-        extra_candidates+=("$prompt_path")
-        extra_labels+=("$(basename "$prompt_path")")
-    done
-
-    if [[ ${#extra_candidates[@]} -eq 0 ]]; then
-        return
-    fi
-
-    echo ""
-    echo -e "${CYAN}➕ Append Extra Prompt Overlays (optional):${NC}"
-    for idx in "${!extra_candidates[@]}"; do
-        printf "   [%d] %s (%s)\n" $((idx + 1)) "${extra_labels[$idx]}" "${extra_candidates[$idx]}"
-    done
-
-    local extra_selection=""
-    read -p "   Select extra prompts by number (comma-separated, Enter for none): " extra_selection
-    exit_if_quit "$extra_selection"
-
-    if [[ -z "$extra_selection" ]]; then
-        echo -e "${YELLOW}ℹ️  No additional prompt overlays selected.${NC}"
-        return
-    fi
-
-    extra_selection=${extra_selection//,/ }
-    extra_selection=${extra_selection//;/ }
-    extra_selection=${extra_selection//$'\t'/ }
-    extra_selection=${extra_selection//$'\n'/ }
-
-    local chosen=()
-    for token in $extra_selection; do
-        if [[ ! "$token" =~ ^[0-9]+$ ]]; then
-            echo -e "${YELLOW}ℹ️  Ignoring invalid selection: $token${NC}"
-            continue
-        fi
-        local index=$((token - 1))
-        if (( index < 0 || index >= ${#extra_candidates[@]} )); then
-            echo -e "${YELLOW}ℹ️  Selection out of range: $token${NC}"
-            continue
-        fi
-        local candidate="${extra_candidates[$index]}"
-        local duplicate=0
-        for existing in "${chosen[@]}"; do
-            if [[ "$existing" == "$candidate" ]]; then
-                duplicate=1
-                break
-            fi
-        done
-        if (( ! duplicate )); then
-            chosen+=("$candidate")
-        fi
-    done
-
-    if (( ${#chosen[@]} == 0 )); then
-        echo -e "${YELLOW}ℹ️  No additional prompt overlays selected.${NC}"
-        return
-    fi
-
-    ADDITIONAL_PROMPT_PATHS=("${chosen[@]}")
-    local overlay_names=()
-    for path in "${ADDITIONAL_PROMPT_PATHS[@]}"; do
-        overlay_names+=("$(basename "$path")")
-    done
-    local overlay_summary
-    overlay_summary=$(IFS=', '; echo "${overlay_names[*]}")
-    echo -e "${GREEN}✅ Added overlays: $overlay_summary${NC}"
+    return
 }
 
 # Function to select startup action
