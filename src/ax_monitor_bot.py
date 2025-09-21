@@ -88,7 +88,7 @@ def load_plugin(plugin_type: str, config: Optional[Dict[str, Any]] = None):
         return plugin_class(config)
     except (ImportError, AttributeError) as e:
         print(f"❌ Failed to load plugin '{plugin_type}': {e}")
-        print(f"   Available plugins: ollama, echo")
+        print(f"   Available plugins: ollama, echo, openrouter")
         sys.exit(1)
 
 
