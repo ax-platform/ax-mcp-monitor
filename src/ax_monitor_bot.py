@@ -18,6 +18,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+from message_queue import MessageQueue, MessageJob
+
 # Suppress pydantic validation warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
@@ -216,12 +218,62 @@ async def main():
     
     # Track timing for heartbeat
     start_time = time.time()
+    message_queue = MessageQueue()
+    worker_task: Optional[asyncio.Task[None]] = None
     
     try:
         first_loop = True
         printed_listen = False
         progress_task = None
         status_block_printed = -1  # for periodic "no mentions" summary
+
+        async def process_queue_job(job: MessageJob) -> None:
+            nonlocal progress_task
+
+            mention_text = job.payload.get("mention", "")
+            print(
+                f"\n🚚 Processing job {job.id}"
+                f" (queue depth: {message_queue.size()})"
+            )
+
+            try:
+                response = await plugin.process_message(mention_text)
+                if response is not None:
+                    print(f"Plugin response: {response[:200]}...")
+                else:
+                    response = ""
+            except Exception as e:
+                print(f"❌ Plugin error: {e}")
+                response = f"Sorry, I encountered an error: {e}"
+
+            print("\n📤 Sending response...")
+            if await client.send_message(response):
+                print("✅ Response sent successfully!")
+            else:
+                print("❌ Failed to send response")
+                if loop_mode:
+                    print("⏳ Waiting 30 seconds before retrying due to send failure...")
+                    await asyncio.sleep(30)
+
+            if loop_mode and (progress_task is None or progress_task.done()):
+                progress_task = asyncio.create_task(show_progress(start_time))
+
+        async def queue_worker() -> None:
+            while True:
+                try:
+                    job = await message_queue.get()
+                except asyncio.CancelledError:
+                    break
+
+                try:
+                    await process_queue_job(job)
+                except Exception as exc:
+                    print(f"❌ Queue worker error for job {getattr(job, 'id', '?')}: {exc}")
+                finally:
+                    message_queue.task_done()
+
+        if loop_mode:
+            worker_task = asyncio.create_task(queue_worker())
         while True:
             # Step 1: Check messages (with wait in loop mode)
             if loop_mode:
@@ -359,37 +411,34 @@ async def main():
             print(f"\n🎯 Found mention: {latest_mention}")
 
             # Step 3: Process with plugin
-            print(f"\n🤔 Processing with {plugin.get_name()}...")
-            try:
-                response = await plugin.process_message(latest_mention)
-                print(f"Plugin response: {response[:200]}...")
-            except Exception as e:
-                print(f"❌ Plugin error: {e}")
-                response = f"Sorry, I encountered an error: {e}"
-
-            # Step 4: Send response using persistent client
-            print(f"\n📤 Sending response...")
-            # Rely on the model prompt to include mentions; do not inject headers here
-            if await client.send_message(response):
-                print("✅ Response sent successfully!")
-            else:
-                print("❌ Failed to send response")
-                # Add delay on failure to prevent hammering
-                if loop_mode:
-                    print("⏳ Waiting 30 seconds before retrying due to send failure...")
-                    await asyncio.sleep(30)
-            
-            # Exit if not in loop mode
             if not loop_mode:
+                temp_job = MessageJob(
+                    id="single-run",
+                    created_at=time.time(),
+                    payload={
+                        "mention": latest_mention,
+                        "author": latest_author,
+                    },
+                )
+                await process_queue_job(temp_job)
                 return 0
-            
-            # Add a small delay between loops to prevent rapid polling
-            if loop_mode:
-                await asyncio.sleep(2)  # 2 second minimum delay between checks
-                # Resume heartbeat after handling the mention
-                if progress_task is None:
-                    progress_task = asyncio.create_task(show_progress(start_time))
+
+            job = await message_queue.enqueue(
+                {
+                    "mention": latest_mention,
+                    "author": latest_author,
+                }
+            )
+            print(
+                f"📥 Enqueued job {job.id}"
+                f" (queue depth: {message_queue.size()})"
+            )
+
+            if progress_task is None or progress_task.done():
+                progress_task = asyncio.create_task(show_progress(start_time))
+
             first_loop = False
+            continue
                 
     finally:
         # Clean up connection
@@ -398,6 +447,12 @@ async def main():
         except Exception as e:
             # Ignore errors during cleanup
             pass
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
