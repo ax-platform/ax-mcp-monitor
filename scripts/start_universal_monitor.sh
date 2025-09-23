@@ -26,6 +26,7 @@ ADDITIONAL_PROMPT_PATHS=()
 CONVERSATION_SYSTEM_PROMPT_PATH=""
 LAST_SYSTEM_PROMPT_SOURCE=""
 LAST_SYSTEM_PROMPT_TEXT=""
+LANGGRAPH_BACKEND=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -633,6 +634,8 @@ apply_system_prompt_env() {
 
     unset OLLAMA_SYSTEM_PROMPT
     unset OLLAMA_SYSTEM_PROMPT_FILE
+    unset LANGGRAPH_SYSTEM_PROMPT
+    unset LANGGRAPH_SYSTEM_PROMPT_FILE
     unset OPENROUTER_SYSTEM_PROMPT
     unset OPENROUTER_SYSTEM_PROMPT_FILE
 
@@ -678,14 +681,18 @@ apply_system_prompt_env() {
         export OLLAMA_SYSTEM_PROMPT
         printf -v OPENROUTER_SYSTEM_PROMPT "%s" "$combined"
         export OPENROUTER_SYSTEM_PROMPT
+        printf -v LANGGRAPH_SYSTEM_PROMPT "%s" "$combined"
+        export LANGGRAPH_SYSTEM_PROMPT
         LAST_SYSTEM_PROMPT_TEXT="$combined"
     elif [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_SYSTEM_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
         export OPENROUTER_SYSTEM_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export LANGGRAPH_SYSTEM_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
         LAST_SYSTEM_PROMPT_TEXT=$(read_prompt_file "$BASE_SYSTEM_PROMPT_PATH")
     elif [[ -n "$scenario_path" && -f "$scenario_path" ]]; then
         export OLLAMA_SYSTEM_PROMPT_FILE="$scenario_path"
         export OPENROUTER_SYSTEM_PROMPT_FILE="$scenario_path"
+        export LANGGRAPH_SYSTEM_PROMPT_FILE="$scenario_path"
         LAST_SYSTEM_PROMPT_TEXT=$(read_prompt_file "$scenario_path")
     fi
 }
@@ -929,9 +936,11 @@ run_ai_battle_mode() {
     if [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
         export OPENROUTER_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export LANGGRAPH_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
     else
         unset OLLAMA_BASE_PROMPT_FILE
         unset OPENROUTER_BASE_PROMPT_FILE
+        unset LANGGRAPH_BASE_PROMPT_FILE
     fi
 
     if ! prepare_ollama "$OLLAMA_MODEL"; then
@@ -1684,10 +1693,13 @@ select_single_agent_behavior() {
         "monitor::🧠 Ollama Monitor Mode::LLM monitors for a mention in aX"
         "kickoff::🗣️ Ollama Conversation Mode::Trigger a short conversation, then keep listening"
         "openrouter::🌐 OpenRouter Monitor Mode::Use OpenRouter-hosted completions (e.g., Grok 4 Fast)"
+        "langgraph::🕸️ LangGraph Monitor Mode::Route replies through LangGraph with MCP tool support"
     )
 
     local selection
     selection=$(cursor_menu "${CYAN}Pick Your Plugin:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    LANGGRAPH_BACKEND=""
 
     case "$selection" in
         monitor)
@@ -1718,6 +1730,17 @@ select_single_agent_behavior() {
             export PLUGIN_TYPE="openrouter"
             echo -e "${GREEN}✅ Selected: OpenRouter Monitor Mode${NC}"
             if ! select_openrouter_model; then
+                return 1
+            fi
+            select_system_prompt
+            STARTUP_ACTION="listen_only"
+            ;;
+        langgraph)
+            SINGLE_AGENT_BEHAVIOR="monitor"
+            CONVERSATION_MODE=0
+            export PLUGIN_TYPE="langgraph"
+            echo -e "${GREEN}✅ Selected: LangGraph Monitor Mode${NC}"
+            if ! select_langgraph_backend; then
                 return 1
             fi
             select_system_prompt
@@ -1898,6 +1921,47 @@ select_openrouter_model() {
     local resolved="${!target_var}"
     export "$target_var=$resolved"
     echo -e "${GREEN}✅ Selected: $resolved${NC}"
+    return 0
+}
+
+select_langgraph_backend() {
+    echo ""
+    echo -e "${CYAN}🕸️ LangGraph Backend Selection:${NC}"
+
+    local default_index=1
+    if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+        default_index=2
+    fi
+
+    local options=(
+        "openrouter::🌐 OpenRouter Backend::Use OpenRouter-hosted models with LangGraph workflow"
+        "ollama::🤖 Ollama Backend::Use local Ollama models with LangGraph workflow"
+    )
+
+    local selection
+    selection=$(cursor_menu "${CYAN}Choose LangGraph Backend:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || return 1
+
+    case "$selection" in
+        openrouter)
+            export LANGGRAPH_BACKEND="openrouter"
+            echo -e "${GREEN}✅ LangGraph backend set to OpenRouter${NC}"
+            if ! select_openrouter_model; then
+                return 1
+            fi
+            ;;
+        ollama)
+            export LANGGRAPH_BACKEND="ollama"
+            echo -e "${GREEN}✅ LangGraph backend set to Ollama${NC}"
+            if ! select_ollama_model; then
+                return 1
+            fi
+            ;;
+        *)
+            echo -e "${RED}❌ Invalid LangGraph backend${NC}"
+            return 1
+            ;;
+    esac
+
     return 0
 }
 
@@ -2192,9 +2256,11 @@ reset_session_state() {
     unset MCP_CONFIG_PATH AGENT_NAME AGENT_HANDLE AGENT_EMOJI
     unset OLLAMA_MODEL OLLAMA_SYSTEM_PROMPT OLLAMA_SYSTEM_PROMPT_FILE OLLAMA_BASE_PROMPT_FILE
     unset OPENROUTER_MODEL OPENROUTER_SYSTEM_PROMPT OPENROUTER_SYSTEM_PROMPT_FILE OPENROUTER_BASE_PROMPT_FILE
+    unset LANGGRAPH_BACKEND LANGGRAPH_SYSTEM_PROMPT LANGGRAPH_SYSTEM_PROMPT_FILE LANGGRAPH_BASE_PROMPT_FILE
     unset CUSTOM_STARTUP_MESSAGE CONVERSATION_TARGET CONVERSATION_TEMPLATE
     unset SESSION_TAG_PRIMARY SESSION_TAGS SESSION_TAG_DISPLAY SESSION_ANNOUNCEMENT
     CONVERSATION_SYSTEM_PROMPT_PATH=""
+    LANGGRAPH_BACKEND=""
     if [[ -n "$DEFAULT_BASE_PROMPT_PATH" && -f "$DEFAULT_BASE_PROMPT_PATH" ]]; then
         BASE_SYSTEM_PROMPT_PATH="$DEFAULT_BASE_PROMPT_PATH"
     else
@@ -2285,9 +2351,11 @@ if [[ "$MODE_SELECTION" == "single" && "$CONVERSATION_MODE" -eq 1 ]]; then
     if [[ -n "$BASE_SYSTEM_PROMPT_PATH" && -f "$BASE_SYSTEM_PROMPT_PATH" ]]; then
         export OLLAMA_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
         export OPENROUTER_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
+        export LANGGRAPH_BASE_PROMPT_FILE="$BASE_SYSTEM_PROMPT_PATH"
     else
         unset OLLAMA_BASE_PROMPT_FILE
         unset OPENROUTER_BASE_PROMPT_FILE
+        unset LANGGRAPH_BASE_PROMPT_FILE
     fi
     kickoff_args=("scripts/moderator_prompt_example.py" "$AGENT_HANDLE" "$CONVERSATION_TARGET" "--template" "$CONVERSATION_TEMPLATE" "--plugin" "ollama" "--send" "--config" "$MCP_CONFIG_PATH")
     if [[ -n "$OLLAMA_MODEL" ]]; then
@@ -2322,6 +2390,13 @@ else
         monitor_model="$OLLAMA_MODEL"
     elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
         monitor_model="$OPENROUTER_MODEL"
+    elif [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
+        echo "   LangGraph backend: ${LANGGRAPH_BACKEND:-openrouter}"
+        if [[ "$LANGGRAPH_BACKEND" == "ollama" ]]; then
+            monitor_model="$OLLAMA_MODEL"
+        else
+            monitor_model="$OPENROUTER_MODEL"
+        fi
     fi
     if [[ -n "$monitor_model" ]]; then
         echo "   Model: $monitor_model"
@@ -2340,7 +2415,7 @@ echo ""
 # ensure_oauth_tokens already verified config and tokens
 
 # Setup Ollama if needed
-if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
+if [[ "$PLUGIN_TYPE" == "ollama" || ( "$PLUGIN_TYPE" == "langgraph" && "${LANGGRAPH_BACKEND:-}" == "ollama" ) ]]; then
     if ! prepare_ollama "$OLLAMA_MODEL"; then
         echo -e "${YELLOW}↩️  Returning to the main menu so you can start Ollama or install the requested model.${NC}"
         prompt_return_to_menu
@@ -2358,6 +2433,13 @@ if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
     echo "   Model: $OLLAMA_MODEL"
 elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
     echo "   Model: $OPENROUTER_MODEL"
+elif [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
+    echo "   LangGraph backend: ${LANGGRAPH_BACKEND:-openrouter}"
+    if [[ "$LANGGRAPH_BACKEND" == "ollama" ]]; then
+        echo "   Model: $OLLAMA_MODEL"
+    else
+        echo "   Model: $OPENROUTER_MODEL"
+    fi
 fi
 if [[ "$MODE_SELECTION" != "echo" ]]; then
     print_system_prompt_details "   " "$LAST_SYSTEM_PROMPT_SOURCE" "$LAST_SYSTEM_PROMPT_TEXT"

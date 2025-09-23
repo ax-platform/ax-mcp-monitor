@@ -11,6 +11,8 @@ authors = [
 dependencies = [
   "mcp[cli]",
   "openai>=1.106.1",
+  "langgraph>=0.6.7",
+  "langchain-mcp-adapters>=0.1.10",
 ]
 
 [project.scripts]
@@ -22,4 +24,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 dev-dependencies = []
-

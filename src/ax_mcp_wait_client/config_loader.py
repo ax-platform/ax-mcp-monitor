@@ -13,16 +13,96 @@ from typing import Dict, Any, Optional
 
 
 class MCPConfig:
-    """Represents configuration for an MCP server connection"""
-    
-    def __init__(self, server_url: str, oauth_url: str, agent_name: str, token_dir: str):
+    """Represents configuration for an MCP server connection."""
+
+    def __init__(
+        self,
+        server_url: str,
+        oauth_url: str,
+        agent_name: str,
+        token_dir: str,
+        *,
+        raw_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.server_url = server_url
         self.oauth_url = oauth_url
         self.agent_name = agent_name
         self.token_dir = token_dir
+        self.raw_config = raw_config or {}
     
     def __repr__(self):
         return f"MCPConfig(server={self.server_url}, agent={self.agent_name})"
+
+
+def _extract_server_config(server_name: str, server_config: Dict[str, Any]) -> MCPConfig:
+    args = server_config.get('args', [])
+    server_url = None
+    oauth_url = None
+    agent_name = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        if not arg.startswith('-') and arg not in ['-y', 'mcp-remote@0.1.18'] and not server_url:
+            server_url = arg
+        elif arg == '--oauth-server' and i + 1 < len(args):
+            oauth_url = args[i + 1]
+            i += 1
+        elif arg == '--header' and i + 1 < len(args):
+            header = args[i + 1]
+            if header.startswith('X-Agent-Name:'):
+                agent_name = header.split(':', 1)[1]
+            i += 1
+
+        i += 1
+
+    env = server_config.get('env', {}) or {}
+    token_dir = env.get('MCP_REMOTE_CONFIG_DIR')
+
+    if not server_url:
+        raise ValueError("Could not extract server URL from config")
+    if not token_dir:
+        token_dir = os.path.expanduser(os.path.join("~/.mcp-auth", server_name))
+
+    if not oauth_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(server_url)
+        oauth_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    if not agent_name:
+        agent_name = os.path.basename(token_dir)
+
+    token_dir = os.path.expanduser(token_dir)
+
+    return MCPConfig(
+        server_url=server_url,
+        oauth_url=oauth_url,
+        agent_name=agent_name,
+        token_dir=token_dir,
+        raw_config=server_config,
+    )
+
+
+def parse_all_mcp_servers(config_path: str) -> Dict[str, MCPConfig]:
+    """Parse every server entry in a MCP config file."""
+
+    config_path = Path(config_path).expanduser()
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    servers = config.get('mcpServers', {})
+    if not servers:
+        raise ValueError(f"No MCP servers defined in {config_path}")
+
+    parsed: Dict[str, MCPConfig] = {}
+    for name, server_config in servers.items():
+        parsed[name] = _extract_server_config(name, server_config)
+    return parsed
 
 
 def parse_mcp_config(config_path: str, server_name: Optional[str] = None) -> MCPConfig:
@@ -41,76 +121,14 @@ def parse_mcp_config(config_path: str, server_name: Optional[str] = None) -> MCP
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
-    servers = config.get('mcpServers', {})
-    
-    if not servers:
-        raise ValueError(f"No MCP servers defined in {config_path}")
-    
-    # Use specified server or first available
+    parsed = parse_all_mcp_servers(config_path)
+
     if server_name:
-        if server_name not in servers:
-            raise ValueError(f"Server '{server_name}' not found in config. Available: {list(servers.keys())}")
-        server_config = servers[server_name]
-    else:
-        server_name = next(iter(servers.keys()))
-        server_config = servers[server_name]
-    
-    # Extract server URL and OAuth URL from args
-    args = server_config.get('args', [])
-    server_url = None
-    oauth_url = None
-    agent_name = None
-    
-    # Parse args to find URLs and headers
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        
-        # Server URL is typically the first non-flag argument after command
-        if not arg.startswith('-') and arg not in ['-y', 'mcp-remote@0.1.18'] and not server_url:
-            server_url = arg
-        elif arg == '--oauth-server' and i + 1 < len(args):
-            oauth_url = args[i + 1]
-            i += 1
-        elif arg == '--header' and i + 1 < len(args):
-            header = args[i + 1]
-            if header.startswith('X-Agent-Name:'):
-                agent_name = header.split(':', 1)[1]
-            i += 1
-        
-        i += 1
-    
-    # Get token directory from env
-    env = server_config.get('env', {})
-    token_dir = env.get('MCP_REMOTE_CONFIG_DIR')
-    
-    if not server_url:
-        raise ValueError(f"Could not extract server URL from config")
-    if not token_dir:
-        raise ValueError(f"No MCP_REMOTE_CONFIG_DIR in environment settings")
-    
-    # Default OAuth URL to base of server URL if not specified
-    if not oauth_url:
-        from urllib.parse import urlparse
-        parsed = urlparse(server_url)
-        oauth_url = f"{parsed.scheme}://{parsed.netloc}"
-    
-    # Default agent name if not found
-    if not agent_name:
-        agent_name = os.path.basename(token_dir)
-    
-    # Expand token directory path
-    token_dir = os.path.expanduser(token_dir)
-    
-    return MCPConfig(
-        server_url=server_url,
-        oauth_url=oauth_url,
-        agent_name=agent_name,
-        token_dir=token_dir
-    )
+        if server_name not in parsed:
+            raise ValueError(f"Server '{server_name}' not found in config. Available: {list(parsed.keys())}")
+        return parsed[server_name]
+
+    return next(iter(parsed.values()))
 
 
 def get_default_config_path() -> Optional[str]:
