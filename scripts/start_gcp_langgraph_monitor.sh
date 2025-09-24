@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Quick launcher for the heartbeat LangGraph monitor against the remote aX MCP.
-# Usage: scripts/start_gcp_langgraph_monitor.sh [optional extra args]
-# Example: scripts/start_gcp_langgraph_monitor.sh --plugin-config configs/langgraph_grok_prompt.json
+# Usage: scripts/start_gcp_langgraph_monitor.sh [--quiet] [optional extra args]
+# Example: scripts/start_gcp_langgraph_monitor.sh --quiet --plugin-config configs/langgraph_grok_prompt.json
 
 set -euo pipefail
 
@@ -42,10 +42,22 @@ echo "   Config : $CONFIG_PATH"
 echo "   Prompt : $PROMPT_PATH"
 echo "   Model  : $OPENROUTER_MODEL"
 echo "   Log    : logs/gcp_langgraph_monitor.log"
+if [[ "${QUIET:-0}" == "1" ]]; then
+    echo "   Mode   : quiet"
+fi
 
+# Build quiet passthrough without tripping nounset on empty arrays
+QUIET_FLAGS=()
+if [[ "${QUIET:-0}" == "1" ]]; then
+    QUIET_FLAGS=(--quiet)
+fi
+
+echo "   ErrLog: logs/gcp_langgraph_transport.err"
 .venv/bin/python scripts/mcp_use_heartbeat_monitor.py \
     --config "$CONFIG_PATH" \
     --plugin langgraph \
     --wait-timeout "${WAIT_TIMEOUT:-25}" \
     --stall-threshold "${STALL_THRESHOLD:-180}" \
-    "$@" | tee logs/gcp_langgraph_monitor.log
+    ${QUIET_FLAGS[@]+"${QUIET_FLAGS[@]}"} \
+    "$@" \
+    2>> logs/gcp_langgraph_transport.err | tee logs/gcp_langgraph_monitor.log
