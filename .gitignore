@@ -30,7 +30,6 @@ lmstudio.py
 
 # Dev scripts and prompts not meant for publish
 scripts/dev_*.sh
-scripts/mcp_use_*.py
 scripts/minimal_monitor_tester.py
 scripts/run_monitor_reliability_tester.py
 scripts/test_ddg.py

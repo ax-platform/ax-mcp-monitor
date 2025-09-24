@@ -53,6 +53,32 @@ if [[ "${QUIET:-0}" == "1" ]]; then
 fi
 
 echo "   ErrLog: logs/gcp_langgraph_transport.err"
+echo
+echo "    ╔═══════════════════════════════════╗"
+echo "    ║         🤖 AI MONITOR 🤖         ║"
+echo "    ║                                   ║"
+echo "    ║  ███╗   ███╗ ██████╗ ███╗   ██╗  ║"
+echo "    ║  ████╗ ████║██╔═══██╗████╗  ██║  ║"
+echo "    ║  ██╔████╔██║██║   ██║██╔██╗ ██║  ║"
+echo "    ║  ██║╚██╔╝██║██║   ██║██║╚██╗██║  ║"
+echo "    ║  ██║ ╚═╝ ██║╚██████╔╝██║ ╚████║  ║"
+echo "    ║  ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝  ║"
+echo "    ║                                   ║"
+echo "    ║      👁️  WATCHING MENTIONS  👁️   ║"
+echo "    ║                                   ║"
+echo "    ║  🔄 Loading components...         ║"
+echo "    ║                                   ║"
+echo "    ║      🚀 READY TO RESPOND! 🚀      ║"
+echo "    ╚═══════════════════════════════════╝"
+echo
+
+# Check if virtual environment exists
+if [[ ! -f ".venv/bin/python" ]]; then
+    echo "❌ Virtual environment not found at .venv/bin/python"
+    echo "   Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
 .venv/bin/python scripts/mcp_use_heartbeat_monitor.py \
     --config "$CONFIG_PATH" \
     --plugin langgraph \
