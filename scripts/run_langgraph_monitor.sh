@@ -49,4 +49,4 @@ export BASE_SYSTEM_PROMPT_PATH="$PROMPT_PATH"
 export OPENROUTER_BASE_PROMPT_FILE="$PROMPT_PATH"
 export LANGGRAPH_BASE_PROMPT_FILE="$PROMPT_PATH"
 
-exec uv run python simple_working_monitor.py --loop "$@"
+exec uv run reliable_monitor.py --loop "$@"

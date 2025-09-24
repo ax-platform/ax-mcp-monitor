@@ -955,7 +955,7 @@ run_ai_battle_mode() {
     echo
 
     echo "📡 Player 2 starting up..."
-    uv run python simple_working_monitor.py --loop &
+    uv run reliable_monitor.py --loop &
     local player2_pid=$!
 
     sleep 5
@@ -1030,9 +1030,9 @@ run_ai_battle_mode() {
         fi
 
         echo "   Cleaning up any remaining monitor processes..."
-        pkill -f "simple_working_monitor.py" 2>/dev/null || true
-        pkill -f "python.*simple_working_monitor" 2>/dev/null || true
-        pkill -f "uv run python simple_working_monitor" 2>/dev/null || true
+        pkill -f "reliable_monitor.py" 2>/dev/null || true
+        pkill -f "python.*reliable_monitor" 2>/dev/null || true
+        pkill -f "uv run reliable_monitor" 2>/dev/null || true
 
         echo -e "${GREEN}✅ All processes stopped cleanly${NC}"
         echo "👋 Battle ended!"
@@ -1063,7 +1063,7 @@ run_ai_battle_mode() {
     local quit_handler_pid=$!
 
     set +e
-    uv run python simple_working_monitor.py --loop
+    uv run reliable_monitor.py --loop
     local initiator_exit=$?
     set -e
 
@@ -2453,10 +2453,10 @@ echo ""
 monitor_exit=0
 set +e
 if (( ${#FORWARD_ARGS[@]} )); then
-    uv run python simple_working_monitor.py --loop "${FORWARD_ARGS[@]}"
+    uv run reliable_monitor.py --loop "${FORWARD_ARGS[@]}"
     monitor_exit=$?
 else
-    uv run python simple_working_monitor.py --loop
+    uv run reliable_monitor.py --loop
     monitor_exit=$?
 fi
 set -e

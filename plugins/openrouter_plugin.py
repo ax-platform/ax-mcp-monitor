@@ -234,6 +234,24 @@ class OpenrouterPlugin(BasePlugin):
 
         return reply
 
+    def on_monitor_context_ready(self) -> None:
+        allowed_dirs = self.monitor_context.get("allowed_directories") or []
+        if not allowed_dirs or not self.messages_history:
+            return
+
+        note = (
+            "Filesystem access is limited to the directories below. "
+            "When using filesystem tools (e.g., read_text_file, write_file), always supply a 'path' within these directories and include required arguments such as 'content' for write_file.\n"
+            + "\n".join(f"- {path}" for path in allowed_dirs)
+        )
+
+        if self.messages_history[0].get("role") == "system":
+            content = self.messages_history[0].get("content", "")
+            if note not in content:
+                self.messages_history[0]["content"] = f"{content}\n\n{note}".strip()
+        else:
+            self.messages_history.insert(0, {"role": "system", "content": note})
+
     def reset_context(self) -> None:
         if self.messages_history:
             self.messages_history = self.messages_history[:1]

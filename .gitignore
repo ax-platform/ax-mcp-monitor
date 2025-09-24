@@ -1,67 +1,43 @@
-# Python
-__pycache__/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-.venv/
-uv.lock
-.DS_Store
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-dist/
-build/
-
-# Authentication (NEVER commit!)
-.mcp-auth/
-tokens.json
-*_tokens.json
-
-# Local development
-.archive_cleanup/
-.archive_old/
-archive/
-test_*.py
-send_test*.py
-simple_*.py
-mcp_client_simple.py
-
-# Local configs (keep examples)
-configs/mcp_config.json
-configs/mcp_config_*.json
-!configs/mcp_config.example.json
-
-# Local development configs
-configs/feature_flags.example.sh
-configs/thinking_tags_config.json
-prompts/ax_base_system_prompt.txt
-prompts/ax_code_support_overlay.txt
-
-# Reliable monitor data
-data/
-messages*.db
-*.db
-
-# Evaluation logs
+# Logs and runtime artifacts
 logs/
+*.log
 
-# IDE
+# Python cache / virtualenv
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+
+# Local config/secrets
+.env
+.mcp.json
+messages.db
+
+# Build metadata
+uv.lock
+*.egg-info/
+
+# Editor/OS junk
 .vscode/
 .idea/
-*.swp
-*.swo
+.DS_Store
 
-# Local docs/notes
-WORKING_SOLUTION.md
-TODO.md
-NOTES.md
-.gemini/
-.mcp.json
-AGENTS.md
-GEMINI.md
-configs/mcp_config_prod.json
-.env
-.pycache/
+# Generated reports / docs drafts
+reliability_test_report_*.json
+docs/
+llms-full.txt
+lmstudio.py
+
+# Dev scripts and prompts not meant for publish
+scripts/dev_*.sh
+scripts/mcp_use_*.py
+scripts/minimal_monitor_tester.py
+scripts/run_monitor_reliability_tester.py
+scripts/test_ddg.py
+prompts/*.txt
+configs/*.json
+configs/*.sh
+
+# Tests stay local
+tests/
+

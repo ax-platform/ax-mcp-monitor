@@ -129,20 +129,46 @@ class LanggraphPlugin(BasePlugin):
         self._tool_runs = 0
         self._tool_specs: List[Dict[str, Any]] = []
         self._available_tool_names: set[str] = set()
+        streaming_setting = str(
+            self.config.get("streaming", os.getenv("LANGGRAPH_STREAMING", "true"))
+        ).lower()
+        self.enable_streaming = streaming_setting not in {"0", "false", "no"}
+        force_prefix_setting = str(
+            self.config.get("force_sender_prefix", os.getenv("LANGGRAPH_FORCE_MENTION", "false"))
+        ).lower()
+        self.force_sender_prefix = force_prefix_setting in {"1", "true", "yes"}
 
     def on_monitor_context_ready(self) -> None:
         if not self.current_date:
             return
+
         first = self._history[0] if self._history else None
         if first and first.get("role") == "system":
             content = first.get("content", "")
             if f"Current date:" not in content:
-                self._history[0] = {
-                    "role": "system",
-                    "content": f"Current date: {self.current_date}\n\n{content}",
-                }
+                content = f"Current date: {self.current_date}\n\n{content}"
+            allowed_dirs = self.monitor_context.get("allowed_directories") or []
+            if allowed_dirs:
+                dir_list = "\n".join(f"- {path}" for path in allowed_dirs)
+                constraints = (
+                    "Filesystem access is restricted to the directories listed below. "
+                    "When calling filesystem tools (e.g., read_text_file, write_file), you MUST provide a valid 'path' inside these directories, "
+                    "and include required arguments such as 'content' for write_file.\n" + dir_list
+                )
+                if constraints not in content:
+                    content = f"{content}\n\n{constraints}"
+            self._history[0] = {"role": "system", "content": content}
         else:
-            self._history.insert(0, {"role": "system", "content": f"Current date: {self.current_date}"})
+            base_content = f"Current date: {self.current_date}"
+            allowed_dirs = self.monitor_context.get("allowed_directories") or []
+            if allowed_dirs:
+                dir_list = "\n".join(f"- {path}" for path in allowed_dirs)
+                base_content += (
+                    "\n\nFilesystem access is restricted to the directories listed below. "
+                    "When calling filesystem tools (e.g., read_text_file, write_file), include the required arguments and stay within these roots.\n"
+                    f"{dir_list}"
+                )
+            self._history.insert(0, {"role": "system", "content": base_content})
 
     def on_tool_manager_ready(self) -> None:
         self._graph = None  # Rebuild so tools are considered
@@ -285,14 +311,23 @@ class LanggraphPlugin(BasePlugin):
                 required_mentions.append(normalized_sender)
 
         missing_mentions = [
-            handle for handle in required_mentions if not _contains_handle(reply, handle)
+            handle
+            for handle in required_mentions
+            if handle
+            and handle.lower() != "@unknown"
+            and not _contains_handle(reply, handle)
         ]
 
         if missing_mentions:
-            mention_prefix = " ".join(missing_mentions)
-            reply = f"{mention_prefix} — {reply.lstrip('-–—: ')}"
+            primary = missing_mentions[0]
+            reply = reply.lstrip("-–—: ").strip()
+            if not _contains_handle(reply, primary):
+                reply = f"{primary} {reply}" if reply else primary
+            for extra in missing_mentions[1:]:
+                if not _contains_handle(reply, extra):
+                    reply = f"{reply} {extra}".strip()
 
-        if self.auto_mention or normalized_sender:
+        if self.force_sender_prefix:
             reply = _ensure_sender_prefix(reply, normalized_sender)
 
         self._history = _trim_history(messages_after, self.max_history)
@@ -343,14 +378,22 @@ class LanggraphPlugin(BasePlugin):
         if tool_spec:
             kwargs["tools"] = tool_spec
             kwargs["tool_choice"] = "auto"
-        response = await asyncio.to_thread(self.client.chat.completions.create, **kwargs)
-        choice = response.choices[0]
-        message = choice.message
-        message_dict = message.model_dump(mode="json")
+        use_streaming = self.enable_streaming and not tool_spec
+        if use_streaming:
+            stream_result = await asyncio.to_thread(self._stream_completion, kwargs)
+            if stream_result is None:
+                use_streaming = False
+            else:
+                message_dict, pending_calls = stream_result
+        if not use_streaming:
+            response = await asyncio.to_thread(self.client.chat.completions.create, **kwargs)
+            choice = response.choices[0]
+            message = choice.message
+            message_dict = message.model_dump(mode="json")
+            pending_calls = []
         content = message_dict.get("content")
         if isinstance(content, list):
             message_dict["content"] = "".join(_extract_text_chunks(content))
-        pending_calls = []
         tool_calls = message_dict.get("tool_calls") or []
         if tool_calls:
             pending_calls = list(tool_calls)
@@ -366,6 +409,36 @@ class LanggraphPlugin(BasePlugin):
         if "tool_results" in state:
             next_state["tool_results"] = state.get("tool_results")
         return next_state
+
+    def _stream_completion(self, kwargs: Dict[str, Any]) -> Optional[tuple[Dict[str, Any], list]]:
+        aggregated = ""
+        try:
+            print("📝 Streaming reply:", flush=True)
+            stream = self.client.chat.completions.create(stream=True, **kwargs)
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta is None:
+                    continue
+                if getattr(delta, "tool_calls", None):
+                    # Tool calls via streaming require more plumbing; fall back.
+                    return None
+                text_delta = getattr(delta, "content", None)
+                if text_delta:
+                    aggregated += text_delta
+                    print(text_delta, end="", flush=True)
+            if aggregated:
+                print("", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Streaming failed ({exc}); falling back to standard completion", flush=True)
+            return None
+
+        message_dict: Dict[str, Any] = {
+            "role": "assistant",
+            "content": aggregated,
+        }
+        return message_dict, []
 
     async def _node_invoke_tool(self, state: Dict[str, Any]) -> Dict[str, Any]:
         pending_calls = state.get("pending_tool_calls") or []

@@ -21,7 +21,7 @@ import sqlite3
 import hashlib
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -31,8 +31,13 @@ from enum import Enum
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, 'src')
 
-from ax_mcp_wait_client.config_loader import parse_mcp_config, get_default_config_path
+from ax_mcp_wait_client.config_loader import (
+    parse_all_mcp_servers,
+    get_default_config_path,
+)
 from ax_mcp_wait_client.mcp_client import MCPClient
+from ax_mcp_wait_client.mcp_patches import patch_mcp_library
+from mcp_tool_manager import MCPToolManager
 
 class MessageStatus(Enum):
     PENDING = "pending"
@@ -136,7 +141,7 @@ class ReliableMessageStore:
         conn = sqlite3.connect(self.db_path)
         try:
             processed_at = datetime.now() if status in [MessageStatus.COMPLETED, MessageStatus.DEAD_LETTER] else None
-            conn.execute("""
+            cursor = conn.execute("""
                 UPDATE messages 
                 SET status = ?, processed_at = ?, error_message = ?
                 WHERE id = ?
@@ -147,7 +152,7 @@ class ReliableMessageStore:
                 message_id
             ))
             conn.commit()
-            return conn.rowcount > 0
+            return cursor.rowcount > 0
         except Exception as e:
             print(f"❌ Failed to update message status: {e}")
             return False
@@ -218,17 +223,26 @@ class HealthChecker:
     async def health_check(self) -> bool:
         """Perform health check"""
         try:
-            # Simple health check - try to check messages with reasonable timeout
-            result = await self.client.check_messages(wait=False, timeout=300, limit=1)
-            if result is not None:
+            if self.client.has_inflight_request():
+                # Another request (likely the long poll) is already in-flight.
+                # Treat this as healthy so we do not pile on redundant checks.
                 self.last_successful_check = time.time()
                 self.consecutive_failures = 0
                 return True
-            else:
-                self.consecutive_failures += 1
-                return False
+
+            # Simple health check - try to check messages with reasonable timeout
+            await self.client.check_messages(wait=False, timeout=300, limit=1)
+            self.last_successful_check = time.time()
+            self.consecutive_failures = 0
+            return True
         except Exception as e:
-            print(f"🩺 Health check failed: {e}")
+            snapshot = {}
+            try:
+                snapshot = self.client.request_snapshot()
+            except Exception:
+                pass
+            detail = f" | request={snapshot}" if snapshot else ""
+            print(f"🩺 Health check failed: {e}{detail}")
             self.consecutive_failures += 1
             return False
     
@@ -259,7 +273,13 @@ class ReliableMonitor:
         self.agent_handle_lower = ""
         self.self_mention_violation_count = 0
         self._self_handle_pattern: Optional[re.Pattern[str]] = None
-        
+        self.tool_manager: Optional[MCPToolManager] = None
+        self.plugin_config: Dict[str, Any] = {}
+        self.allowed_directories: List[str] = []
+        self.last_wait_success = time.time()
+        self.consecutive_idle_polls = 0
+        self._last_idle_report = 0.0
+
         # Load plugin configuration
         self.plugin_type = os.getenv('PLUGIN_TYPE', 'echo')
         self.plugin = None
@@ -272,19 +292,51 @@ class ReliableMonitor:
     async def initialize(self):
         """Initialize all components"""
         print("🔧 Initializing reliable monitor...")
+
+        # Ensure MCP client patches are applied before any sessions start
+        patch_mcp_library()
         
-        # Load configuration and create client
-        if self.config_path and os.path.exists(self.config_path):
-            cfg = parse_mcp_config(self.config_path)
-            self.client = MCPClient(
-                server_url=cfg.server_url,
-                oauth_server=cfg.oauth_url,
-                agent_name=cfg.agent_name,
-                token_dir=cfg.token_dir,
-            )
-        else:
+        # Load configuration and create client/tool manager
+        if not (self.config_path and os.path.exists(self.config_path)):
             raise Exception("No valid configuration found")
-        
+
+        all_servers = parse_all_mcp_servers(self.config_path)
+        if not all_servers:
+            raise Exception("No MCP servers defined in configuration")
+
+        primary_name = next(iter(all_servers.keys()))
+        primary_cfg = all_servers[primary_name]
+
+        self.client = MCPClient(
+            server_url=primary_cfg.server_url,
+            oauth_server=primary_cfg.oauth_url,
+            agent_name=primary_cfg.agent_name,
+            token_dir=primary_cfg.token_dir,
+        )
+
+        # Only create tool manager if we have additional servers to talk to
+        if len(all_servers) > 1:
+            try:
+                self.tool_manager = MCPToolManager(all_servers, primary_server=primary_name)
+            except Exception as exc:
+                print(f"⚠️ Failed to initialize tool manager: {exc}")
+                self.tool_manager = None
+        else:
+            self.tool_manager = None
+
+        # Capture filesystem roots for plugin guidance
+        allowed_dirs: set[str] = set()
+        for cfg in all_servers.values():
+            raw = getattr(cfg, "raw_config", {}) or {}
+            command = str(raw.get("command", ""))
+            args = raw.get("args") or []
+            if "server-filesystem" in command or any("server-filesystem" in str(arg) for arg in args):
+                for arg in reversed(args):
+                    if isinstance(arg, str) and arg.startswith("/"):
+                        allowed_dirs.add(arg)
+                        break
+        self.allowed_directories = sorted(allowed_dirs)
+
         # Connect with retries
         await self._reliable_connect()
         
@@ -300,10 +352,35 @@ class ReliableMonitor:
         
         # Initialize health checker
         self.health_checker = HealthChecker(self.client)
-        
+
+        # Load optional plugin config file
+        plugin_config_path = os.getenv('PLUGIN_CONFIG')
+        if plugin_config_path and os.path.exists(plugin_config_path):
+            try:
+                with open(plugin_config_path, 'r', encoding='utf-8') as fh:
+                    self.plugin_config = json.load(fh)
+            except Exception as exc:
+                print(f"⚠️ Failed to load plugin config '{plugin_config_path}': {exc}")
+                self.plugin_config = {}
+        else:
+            self.plugin_config = {}
+
         # Load plugin
         self.plugin = self._load_plugin()
-        
+
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.plugin.attach_monitor_context({
+            "current_date": current_date,
+            "tool_manager": self.tool_manager,
+            "allowed_directories": self.allowed_directories,
+        })
+        if self.tool_manager:
+            self.plugin.set_tool_manager(self.tool_manager)
+
+        now = time.time()
+        self.last_wait_success = now
+        self._last_idle_report = now
+
         print(f"✅ Reliable monitor initialized for {self.agent_handle}")
     
     async def _reliable_connect(self, max_retries: int = 10):
@@ -330,7 +407,7 @@ class ReliableMonitor:
             module = importlib.import_module(module_name)
             class_name = ''.join(word.capitalize() for word in self.plugin_type.split('_')) + 'Plugin'
             plugin_class = getattr(module, class_name)
-            return plugin_class({})
+            return plugin_class(self.plugin_config)
         except Exception as e:
             print(f"❌ Failed to load plugin '{self.plugin_type}': {e}")
             raise
@@ -358,12 +435,18 @@ class ReliableMonitor:
                 
                 # Check for new messages
                 await self._check_new_messages()
+
+                # Detect prolonged inactivity and surface diagnostics / recovery
+                await self._maybe_recover_from_idle()
                 
                 # Brief pause before next iteration
                 await asyncio.sleep(1)
                 
         except KeyboardInterrupt:
             print("\\n👋 Shutting down gracefully...")
+        except Exception as exc:
+            print(f"🛑 Monitor loop crashed unexpectedly: {exc}")
+            raise
         finally:
             # Cancel background tasks
             health_task.cancel()
@@ -379,6 +462,7 @@ class ReliableMonitor:
                     await self.client.disconnect()
                 except:
                     pass
+            print("🛑 Monitor loop terminated; exiting run().")
     
     async def _check_new_messages(self):
         """Check for new messages with reliability"""
@@ -386,13 +470,18 @@ class ReliableMonitor:
             # Use reasonable timeout for message checking
             messages = await self.client.check_messages(wait=True, timeout=300, limit=5)
             
-            if messages and '✅ WAIT SUCCESS' in messages:
+            if messages:
+                # Log received messages for debugging (like simple_working_monitor.py)
+                if '✅ WAIT SUCCESS' in messages:
+                    print("\n📨 Messages received:")
+                    print(messages[:500] + "..." if len(messages) > 500 else messages)
+                
                 message_id = self._generate_message_id(messages)
                 
                 # Check if we've already processed this message
                 if self._is_duplicate_message(message_id):
                     return
-                
+
                 # Store raw message immediately for persistence
                 stored_message = StoredMessage(
                     id=message_id,
@@ -411,7 +500,31 @@ class ReliableMonitor:
                     print(f"📥 New message stored: {message_id[:8]}...")
                 else:
                     print(f"❌ Failed to store message: {message_id[:8]}...")
-                    
+                self.last_wait_success = time.time()
+                self.consecutive_idle_polls = 0
+            else:
+                # No message returned (likely due to retry exhaustion); track idle state
+                self.consecutive_idle_polls += 1
+                if self.consecutive_idle_polls in {30, 60, 120}:
+                    snapshot = self.client.request_snapshot() if self.client else {}
+                    pending = self._count_pending_messages()
+                    waited = int(time.time() - self.last_wait_success)
+                    current = snapshot.get('label') if snapshot else 'n/a'
+                    inflight = snapshot.get('inflight') if snapshot else 'n/a'
+                    elapsed_val = snapshot.get('elapsed') if snapshot else None
+                    elapsed_str = (
+                        f"{float(elapsed_val):.3f}"
+                        if isinstance(elapsed_val, (int, float))
+                        else "n/a"
+                    )
+                    print(
+                        "⏳ Still waiting for mentions: "
+                        f"idle={waited}s, inflight={inflight}, "
+                        f"current={current}, "
+                        f"elapsed={elapsed_str}s, "
+                        f"pending={pending}"
+                    )
+
         except asyncio.TimeoutError:
             # Timeout is expected in polling mode
             pass
@@ -548,7 +661,7 @@ class ReliableMonitor:
             base = parts[0] if parts else ""
             base = base.strip('@,:')
             base = re.sub(r'[^0-9A-Za-z_\\-]', '', base)
-            if base:
+            if base and not base.lower().startswith('✅'.lower()) and 'waitsuccess' not in base.lower():
                 return f"@{base}"
         
         return "@unknown"
@@ -559,8 +672,9 @@ class ReliableMonitor:
     
     async def _process_with_plugin(self, message: StoredMessage) -> str:
         """Process message with plugin"""
+        sender = self._resolve_sender_handle(message)
         plugin_context = {
-            "sender": message.sender_handle,
+            "sender": sender,
             "agent_name": self.agent_handle,
             "session_id": None,
         }
@@ -568,7 +682,7 @@ class ReliableMonitor:
         enhanced_message = (
             "aX Platform Message Received\\n"
             f"- Your agent handle: {self.agent_handle}\\n"
-            f"- Mention originated from: {message.sender_handle}\\n"
+            f"- Mention originated from: {sender}\\n"
             "- The sender tagged you in a shared conversation.\\n\\n"
             "MESSAGE CONTENT:\\n"
             f"{message.parsed_mention}"
@@ -597,6 +711,24 @@ class ReliableMonitor:
             return sanitized_response.rstrip() + "\n" + penalty_note
 
         return response
+
+    def _resolve_sender_handle(self, message: StoredMessage) -> str:
+        sender = message.sender_handle or "@unknown"
+        if sender and sender != "@unknown":
+            return sender
+
+        text = message.parsed_mention or ""
+        mentions = re.findall(r"@[0-9A-Za-z_\-]+", text)
+        for mention in mentions:
+            if mention.lower() != self.agent_handle_lower:
+                return mention
+
+        if message.parsed_author:
+            author = message.parsed_author.strip()
+            if author and not author.lower().startswith('✅'.lower()):
+                return author
+
+        return sender
     
     async def _send_response_reliably(self, response: str, max_attempts: int = 3) -> bool:
         """Send response with retry logic"""
@@ -617,9 +749,12 @@ class ReliableMonitor:
             await self.client.disconnect()
         except:
             pass
-        
+
+        reconnect_start = time.time()
+        print("🔌 Initiating reconnect to MCP server...")
         await self._reliable_connect()
-        
+        print(f"🔗 Reconnect complete in {(time.time() - reconnect_start)*1000:.0f} ms")
+
         # Update health checker
         self.health_checker.last_successful_check = time.time()
         self.health_checker.consecutive_failures = 0
@@ -636,7 +771,55 @@ class ReliableMonitor:
             return cursor.fetchone() is not None
         finally:
             conn.close()
-    
+
+    def _count_pending_messages(self) -> int:
+        conn = sqlite3.connect(self.message_store.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE status IN ('pending', 'failed')"
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    async def _maybe_recover_from_idle(self) -> None:
+        if not self.client:
+            return
+
+        now = time.time()
+        idle_seconds = now - self.last_wait_success
+        if idle_seconds < 90:
+            return
+
+        if (now - self._last_idle_report) > 30:
+            snapshot = self.client.request_snapshot()
+            pending = self._count_pending_messages()
+            current = snapshot.get("label") if snapshot else "n/a"
+            elapsed_val = snapshot.get("elapsed") if snapshot else None
+            elapsed = (
+                f"{float(elapsed_val):.3f}"
+                if isinstance(elapsed_val, (int, float))
+                else "n/a"
+            )
+            inflight = snapshot.get("inflight") if snapshot else False
+            last_heartbeat = snapshot.get("last_heartbeat") if snapshot else 0.0
+            hb_age = int(now - last_heartbeat) if last_heartbeat else "n/a"
+            print(
+                "⌛ No mentions processed for "
+                f"{int(idle_seconds)}s (request={current}, inflight={inflight}, "
+                f"elapsed={elapsed}s, pending={pending}, heartbeat_age={hb_age}s)."
+            )
+            self._last_idle_report = now
+
+        if idle_seconds >= max(120, self.message_timeout // 2):
+            print(
+                "🔄 Idle threshold exceeded; recycling connection to recover long poll."
+            )
+            await self._reliable_reconnect()
+            self.last_wait_success = time.time()
+            self.consecutive_idle_polls = 0
+
     async def _retry_failed_messages(self):
         """Background task to retry failed messages"""
         while True:
@@ -686,18 +869,19 @@ class ReliableMonitor:
             
             conn = sqlite3.connect(self.message_store.db_path)
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     DELETE FROM messages 
                     WHERE status IN ('completed') 
                     AND processed_at < ?
-                """, (cutoff.isoformat(),))
-                
-                deleted = conn.rowcount
+                    """,
+                    (cutoff.isoformat(),),
+                )
+                deleted = conn.execute("SELECT changes()").fetchone()[0]
                 conn.commit()
-                
-                if deleted > 0:
+                if deleted:
                     print(f"🧹 Cleaned up {deleted} old messages")
-                    
+                
             finally:
                 conn.close()
 
