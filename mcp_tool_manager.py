@@ -99,6 +99,7 @@ class MCPToolManager:
         *,
         primary_server: str,
     ) -> None:
+        self._primary_name = primary_server
         self._connections: Dict[str, Dict[str, Any]] = {}
         for name, cfg in server_configs.items():
             if name == primary_server:
@@ -106,8 +107,14 @@ class MCPToolManager:
             connection = _build_connection(getattr(cfg, "raw_config", {}) or {})
             if connection:
                 self._connections[name] = connection
+
+        self._primary_connection = _build_connection(
+            getattr(server_configs.get(primary_server), "raw_config", {}) or {}
+        )
         self._client = (
-            MultiServerMCPClient(self._connections) if self._connections else None
+            MultiServerMCPClient(self._connections)
+            if (self._connections or self._primary_connection)
+            else None
         )
         self._tools_lock = asyncio.Lock()
         self._tools_by_name: Dict[str, BaseTool] = {}
@@ -117,10 +124,12 @@ class MCPToolManager:
         self._sessions: Dict[str, ClientSession] = {}
 
     def has_servers(self) -> bool:
-        return bool(self._connections)
+        return bool(self._connections or self._primary_connection)
 
     def has_web_search(self) -> bool:
         if self._web_search_tools:
+            return True
+        if self._primary_connection:
             return True
         return any(
             any(keyword in name.lower() for keyword in _SEARCH_KEYWORDS)
@@ -137,8 +146,25 @@ class MCPToolManager:
                 return self._tools_by_name
             tools: Dict[str, BaseTool] = {}
             web_search: set[str] = set()
+            if self._primary_connection:
+                session = await self._ensure_session(primary=True)
+                if session:
+                    try:
+                        raw_tools = await load_mcp_tools(session)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to load tools from primary server '%s': %s",
+                            self._primary_name,
+                            exc,
+                        )
+                        raw_tools = []
+                    for tool in raw_tools:
+                        name_lower = tool.name.lower()
+                        tools[tool.name] = tool
+                        if any(keyword in name_lower for keyword in _SEARCH_KEYWORDS):
+                            web_search.add(tool.name)
             for server_name in self._connections:
-                session = await self._ensure_session(server_name)
+                session = await self._ensure_session(server_name=server_name)
                 if not session:
                     continue
                 try:
@@ -159,15 +185,23 @@ class MCPToolManager:
             self._web_search_tools = web_search
             return self._tools_by_name
 
-    async def _ensure_session(self, server_name: str) -> Optional[ClientSession]:
-        if server_name in self._sessions:
-            return self._sessions[server_name]
-        if not self._client or server_name not in self._connections:
+    async def _ensure_session(
+        self,
+        *,
+        server_name: Optional[str] = None,
+        primary: bool = False,
+    ) -> Optional[ClientSession]:
+        key = "__primary__" if primary else (server_name or "")
+        if key in self._sessions:
+            return self._sessions[key]
+        connection = self._primary_connection if primary else self._connections.get(server_name or "")
+        if not connection:
+            return None
+        if not self._client:
             return None
         async with self._session_lock:
-            if server_name in self._sessions:
-                return self._sessions[server_name]
-            connection = self._connections[server_name]
+            if key in self._sessions:
+                return self._sessions[key]
             ctx = create_session(connection)
             try:
                 session = await ctx.__aenter__()
@@ -177,12 +211,12 @@ class MCPToolManager:
                     await ctx.__aexit__(type(exc), exc, exc.__traceback__)
                 logger.warning(
                     "Failed to establish session with server '%s': %s",
-                    server_name,
+                    self._primary_name if primary else server_name,
                     exc,
                 )
                 return None
-            self._session_contexts[server_name] = ctx
-            self._sessions[server_name] = session
+            self._session_contexts[key] = ctx
+            self._sessions[key] = session
             return session
 
     async def list_tools(self) -> Dict[str, BaseTool]:
