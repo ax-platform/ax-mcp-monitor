@@ -11,13 +11,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, StateGraph
 from openai import OpenAI
 
 from .base_plugin import BasePlugin
 
 MENTION_PATTERN = re.compile(r"@[0-9A-Za-z_\-]+")
 WEB_SEARCH_PATTERN = re.compile(r"\[\[\s*web-search\s*:\s*(.*?)\]\]", re.IGNORECASE)
+CLAUDE_TOOL_PATTERN = re.compile(r"<tool_call>(?P<body>.*?)</tool_call>", re.IGNORECASE | re.DOTALL)
+CLAUDE_NAME_PATTERN = re.compile(r"<name>(?P<tool>[^<]+)</name>", re.IGNORECASE)
+CLAUDE_PARAMETER_PATTERN = re.compile(
+    r"<parameter\s+name=[\"'](?P<name>[^\"']+)[\"']>(?P<value>.*?)</parameter>",
+    re.IGNORECASE | re.DOTALL,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +143,15 @@ class LanggraphPlugin(BasePlugin):
             self.config.get("force_sender_prefix", os.getenv("LANGGRAPH_FORCE_MENTION", "false"))
         ).lower()
         self.force_sender_prefix = force_prefix_setting in {"1", "true", "yes"}
+        debug_setting = str(
+            self.config.get("tool_debug", os.getenv("LANGGRAPH_TOOL_DEBUG", "false"))
+        ).lower()
+        self._tool_debug_enabled = debug_setting in {"1", "true", "yes", "on"}
+        self._last_user_message: Optional[str] = None
+
+    def _tool_debug(self, message: str) -> None:
+        if self._tool_debug_enabled:
+            print(f"[tool-debug] {message}", flush=True)
 
     def on_monitor_context_ready(self) -> None:
         if not self.current_date:
@@ -145,7 +160,7 @@ class LanggraphPlugin(BasePlugin):
         first = self._history[0] if self._history else None
         if first and first.get("role") == "system":
             content = first.get("content", "")
-            if f"Current date:" not in content:
+            if "Current date:" not in content:
                 content = f"Current date: {self.current_date}\n\n{content}"
             allowed_dirs = self.monitor_context.get("allowed_directories") or []
             if allowed_dirs:
@@ -223,6 +238,7 @@ class LanggraphPlugin(BasePlugin):
 
         history_snapshot = list(self._history)
         history_snapshot.append({"role": "user", "content": formatted_message})
+        self._last_user_message = message
 
         state: Dict[str, Any] = {
             "messages": history_snapshot,
@@ -240,39 +256,80 @@ class LanggraphPlugin(BasePlugin):
             assistant_message = _latest_assistant_message(messages_after)
             reply = (assistant_message.get("content", "") if assistant_message else "").strip()
 
-            search_match = WEB_SEARCH_PATTERN.search(reply) if reply else None
+            pending_calls = result_state.get("pending_tool_calls") or []
+            if pending_calls:
+                summary = [
+                    _describe_tool_call(call)
+                    for call in pending_calls
+                ]
+                self._tool_debug("Model requested tool call(s): " + "; ".join(summary))
+
+            search_query: Optional[str] = None
+            search_tool_name: Optional[str] = None
+            cleaned_reply = reply or ""
+
+            if reply:
+                match = WEB_SEARCH_PATTERN.search(reply)
+                if match:
+                    raw_match = match.group(1) if match else None
+                    candidate = raw_match.strip() if raw_match else ""
+                    if candidate:
+                        search_query = candidate
+                        cleaned_reply = WEB_SEARCH_PATTERN.sub("", reply).strip()
+                if not search_query:
+                    tool_block = CLAUDE_TOOL_PATTERN.search(reply)
+                    block_content: Optional[str] = None
+                    if tool_block:
+                        block_content = tool_block.group("body") or ""
+                        name_match = CLAUDE_NAME_PATTERN.search(block_content)
+                        if name_match:
+                            search_tool_name = name_match.group("tool").strip()
+                    param_scope = block_content if block_content is not None else reply
+                    param_match = CLAUDE_PARAMETER_PATTERN.search(param_scope)
+                    if param_match:
+                        param_name = (param_match.group("name") or "").strip().lower()
+                        if param_name in {"query", "q"}:
+                            candidate = (param_match.group("value") or "").strip()
+                            if candidate:
+                                search_query = candidate
+                                if tool_block:
+                                    cleaned_reply = CLAUDE_TOOL_PATTERN.sub("", reply).strip()
+                                else:
+                                    cleaned_reply = CLAUDE_PARAMETER_PATTERN.sub("", reply).strip()
 
             if (
-                search_match
+                search_query
                 and self.tool_manager
                 and self.tool_manager.has_web_search()
                 and tool_loops < self.settings.tool_max_runs
             ):
                 tool_loops += 1
-                raw_match = search_match.group(1) if search_match else None
-                query = raw_match.strip() if raw_match else ""
-                reply_text = reply or ""
-                cleaned_reply = WEB_SEARCH_PATTERN.sub("", reply_text).strip()
-                if not query:
-                    reply = cleaned_reply or reply
-                    break
 
                 if assistant_message is not None:
                     assistant_message["content"] = cleaned_reply or assistant_message.get("content", "")
 
                 try:
-                    search_result = await self.tool_manager.web_search(query)
+                    search_result = await self.tool_manager.web_search(
+                        search_query,
+                        tool_name=search_tool_name,
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Web search for '%s' failed: %s", query, exc)
+                    logger.warning("Web search for '%s' failed: %s", search_query, exc)
                     search_result = ""
                 if not search_result:
                     reply = cleaned_reply or reply
                     break
 
+                preview = search_result.strip().splitlines()
+                preview_text = " | ".join(preview[:3])
+                self._tool_debug(
+                    f"Web search '{search_query}' returned {len(preview)} line(s): {preview_text}"
+                )
+
                 updated_messages = list(messages_after)
                 updated_messages.append({
                     "role": "user",
-                    "content": f"Web search results for '{query}':\n{search_result}",
+                    "content": f"Web search results for '{search_query}':\n{search_result}",
                 })
 
                 state = {
@@ -497,29 +554,93 @@ class LanggraphPlugin(BasePlugin):
 
         execution_result: Optional[str] = None
         if tool_name:
+            self._tool_debug(
+                f"Invoking tool '{tool_name}' with args {json.dumps(args, ensure_ascii=False)}"
+            )
+            if not args and tool_name.lower() == "fetch":
+                inferred = _extract_first_url(self._last_user_message)
+                if inferred:
+                    args["url"] = inferred
+                    self._tool_debug(
+                        f"Auto-populated missing 'url' argument with '{inferred}'"
+                    )
+            if tool_name.lower() == "fetch" and not args.get("url"):
+                self._tool_debug("Blocking fetch call: missing 'url' argument")
+                return "I need a direct URL to fetch—please share the link you want me to open."
+            if tool_name.lower() == "tasks":
+                required = {"action", "title", "description"}
+                missing = [key for key in required if not args.get(key)]
+                if missing:
+                    error = (
+                        "ToolError: tasks tool requires action, title, and description. "
+                        "Populate those fields before calling the tool."
+                    )
+                    self._tool_debug(
+                        f"Blocking tasks call due to missing fields: {missing}"
+                    )
+                    return error
             execution_result = await self.tool_manager.execute_tool(tool_name, args)
+            if execution_result is None:
+                self._tool_debug(f"Tool '{tool_name}' returned None")
 
         if execution_result:
+            preview = execution_result.strip().splitlines()
+            preview_text = " | ".join(preview[:3])
+            if isinstance(execution_result, str) and execution_result.startswith("ToolError:"):
+                self._tool_debug(
+                    f"Tool '{tool_name}' reported error: {preview_text}"
+                )
+            else:
+                self._tool_debug(
+                    f"Tool '{tool_name}' succeeded ({len(preview)} line(s) returned): {preview_text}"
+                )
             return execution_result
+        elif tool_name:
+            self._tool_debug(
+                f"Tool '{tool_name}' returned empty string; deferring to fallback handling"
+            )
 
         # Fallback: attempt web search if query present
         if tool_name and any(keyword in tool_name.lower() for keyword in ("search", "web")):
             query_value = args.get("query") or args.get("q")
             query_text = str(query_value).strip() if query_value else ""
             if query_text:
+                self._tool_debug(
+                    f"Fallback web search via tool manager for '{query_text}'"
+                )
                 result = await self.tool_manager.web_search(query_text, tool_name=tool_name)
                 if result:
+                    preview = result.strip().splitlines()
+                    preview_text = " | ".join(preview[:3])
+                    self._tool_debug(
+                        f"Fallback search for '{query_text}' produced {len(preview)} line(s): {preview_text}"
+                    )
                     return result
         content = tool_call.get("function", {}).get("arguments", "")
         if isinstance(content, str):
             match = WEB_SEARCH_PATTERN.search(content)
+            query = None
             if match:
                 raw_query = match.group(1)
                 query = raw_query.strip() if raw_query else ""
-                if query:
-                    result = await self.tool_manager.web_search(query)
-                    if result:
-                        return result
+            else:
+                alt_match = CLAUDE_PARAMETER_PATTERN.search(content)
+                if alt_match:
+                    param_name = (alt_match.group("name") or "").strip().lower()
+                    if param_name in {"query", "q"}:
+                        query = (alt_match.group("value") or "").strip()
+            if query:
+                self._tool_debug(
+                    f"Extracted web search query '{query}' from fallback content"
+                )
+                result = await self.tool_manager.web_search(query)
+                if result:
+                    preview = result.strip().splitlines()
+                    preview_text = " | ".join(preview[:3])
+                    self._tool_debug(
+                        f"Direct search for '{query}' produced {len(preview)} line(s): {preview_text}"
+                    )
+                    return result
 
         return "Tool execution not available or failed."
 
@@ -532,13 +653,7 @@ class LanggraphPlugin(BasePlugin):
 def _tool_to_openai_spec(tool: Any) -> Dict[str, Any]:
     name = getattr(tool, "name", "tool")
     description = getattr(tool, "description", "") or ""
-    parameters: Dict[str, Any] = {"type": "object", "properties": {}}
-    args_schema = getattr(tool, "args_schema", None)
-    if hasattr(args_schema, "model_json_schema"):
-        try:
-            parameters = args_schema.model_json_schema()  # type: ignore[attr-defined]
-        except Exception:
-            parameters = {"type": "object", "properties": {}}
+    parameters = _extract_tool_parameters(tool)
     return {
         "type": "function",
         "function": {
@@ -549,6 +664,46 @@ def _tool_to_openai_spec(tool: Any) -> Dict[str, Any]:
     }
 
 
+def _extract_tool_parameters(tool: Any) -> Dict[str, Any]:
+    default = {"type": "object", "properties": {}}
+    args_schema = getattr(tool, "args_schema", None)
+    if isinstance(args_schema, dict):
+        return args_schema or default
+    if hasattr(args_schema, "model_json_schema"):
+        try:
+            schema = args_schema.model_json_schema()  # type: ignore[attr-defined]
+            if isinstance(schema, dict) and schema:
+                return schema
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(args_schema, "json_schema"):
+        try:
+            schema = args_schema.json_schema()  # type: ignore[attr-defined]
+            if isinstance(schema, dict) and schema:
+                return schema
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(args_schema, "schema"):
+        try:
+            schema = args_schema.schema()  # type: ignore[attr-defined]
+            if isinstance(schema, dict) and schema:
+                return schema
+        except Exception:  # noqa: BLE001
+            pass
+    metadata = getattr(tool, "metadata", {}) or {}
+    meta_block = metadata.get("_meta") if isinstance(metadata, dict) else {}
+    if isinstance(meta_block, dict):
+        for key in ("inputSchema", "parameters"):
+            value = meta_block.get(key)
+            if isinstance(value, dict) and value:
+                return value
+    for key in ("inputSchema", "parameters"):
+        value = metadata.get(key) if isinstance(metadata, dict) else None
+        if isinstance(value, dict) and value:
+            return value
+    return default
+
+
 def _extract_text_chunks(content: List[Any]) -> List[str]:
     pieces: List[str] = []
     for part in content:
@@ -557,6 +712,39 @@ def _extract_text_chunks(content: List[Any]) -> List[str]:
         elif isinstance(part, str):
             pieces.append(part)
     return pieces
+
+
+def _describe_tool_call(call: Any) -> str:
+    if not isinstance(call, dict):
+        return str(call)
+    func = call.get("function") or {}
+    name = func.get("name") or "unknown"
+    args = func.get("arguments")
+    if isinstance(args, str):
+        payload = args
+    else:
+        try:
+            payload = json.dumps(args, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            payload = str(args)
+    if payload and len(payload) > 120:
+        payload = payload[:117] + "..."
+    return f"{name}({payload})"
+
+
+_URL_PATTERN = re.compile(r"https?://[^\s>]+", re.IGNORECASE)
+
+
+def _extract_first_url(source: Optional[str]) -> Optional[str]:
+    if not source:
+        return None
+    match = _URL_PATTERN.search(source)
+    if not match:
+        return None
+    candidate = match.group(0)
+    # Trim trailing punctuation that commonly rides along
+    candidate = candidate.rstrip('.,"\'\)\]>')
+    return candidate or None
 
 
 def _normalize_sender(sender: Optional[str]) -> Optional[str]:

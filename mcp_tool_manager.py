@@ -122,6 +122,7 @@ class MCPToolManager:
         self._session_lock = asyncio.Lock()
         self._session_contexts: Dict[str, Any] = {}
         self._sessions: Dict[str, ClientSession] = {}
+        self._last_error: Optional[str] = None
 
     def has_servers(self) -> bool:
         return bool(self._connections or self._primary_connection)
@@ -228,17 +229,24 @@ class MCPToolManager:
         tool_name: str,
         arguments: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
+        self._last_error = None
         tools = await self._ensure_tools()
         tool = tools.get(tool_name)
         if not tool:
-            return None
+            self._last_error = f"ToolError: unknown tool '{tool_name}'"
+            return self._last_error
         payload = arguments or {}
         try:
             result = await tool.ainvoke(payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tool '%s' failed: %s", tool_name, exc)
-            return ""
+            self._last_error = f"ToolError: {exc}"
+            return self._last_error
+        self._last_error = None
         return _stringify_output(result)
+
+    def last_error(self) -> Optional[str]:
+        return self._last_error
 
     async def web_search(
         self,

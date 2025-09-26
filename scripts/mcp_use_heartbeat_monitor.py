@@ -21,10 +21,11 @@ import logging
 import os
 import sqlite3
 import sys
+import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -138,6 +139,7 @@ for noisy_logger, level in (
     ('mcp.client.streamable_http', logging.CRITICAL),
     ('pydantic', logging.CRITICAL),
     ('pydantic_core', logging.CRITICAL),
+    ('mcp_use', logging.ERROR),
 ):
     logging.getLogger(noisy_logger).setLevel(level)
 
@@ -287,6 +289,119 @@ async def _call_messages_with_retry(
         print(f"❌ messages call failed after {retries} attempts: {last_error}")
     return None
 
+
+def _env_truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _schema_from_args(args_schema: Any) -> Optional[dict[str, Any]]:
+    if not args_schema:
+        return None
+    if isinstance(args_schema, dict):
+        return args_schema
+    if hasattr(args_schema, "model_dump"):
+        try:
+            dumped = args_schema.model_dump()  # type: ignore[attr-defined]
+            if isinstance(dumped, dict) and dumped:
+                return dumped
+        except Exception:  # noqa: BLE001
+            pass
+    for attr in ("model_json_schema", "json_schema", "schema", "dict"):
+        fn = getattr(args_schema, attr, None)
+        if not fn:
+            continue
+        try:
+            schema = fn()
+        except TypeError:
+            try:
+                schema = fn(ref_template="{model}")
+            except Exception:  # noqa: BLE001
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(schema, dict) and schema:
+            return schema
+    return None
+
+
+def _format_field_type(spec: dict[str, Any]) -> str:
+    if "type" in spec:
+        if isinstance(spec["type"], list):
+            return " | ".join(spec["type"])
+        return str(spec["type"])
+    if "anyOf" in spec:
+        return " | ".join(
+            part.get("type") or part.get("$ref", "unknown") for part in spec["anyOf"]
+        )
+    if "$ref" in spec:
+        return spec["$ref"]
+    return "unknown"
+
+
+async def _print_tool_catalog(manager: MCPToolManager) -> None:
+    try:
+        tools = await manager.list_tools()
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ Unable to retrieve MCP tools: {exc}")
+        return
+
+    if not tools:
+        print("⚠️ No MCP tools discovered during startup.")
+        return
+
+    print("🧰 MCP tool catalog (visible to agent):")
+    for name, tool in sorted(tools.items()):
+        description = (getattr(tool, "description", "") or "").strip()
+        print(f" • {name}: {description}")
+        args_schema = getattr(tool, "args_schema", None)
+        schema = _schema_from_args(args_schema)
+        if not schema:
+            metadata = getattr(tool, "metadata", {}) or {}
+            meta_block = metadata.get("_meta") if isinstance(metadata, dict) else {}
+            if isinstance(meta_block, dict):
+                schema = meta_block.get("inputSchema") or meta_block.get("parameters")
+            if not schema and isinstance(metadata, dict):
+                schema = metadata.get("inputSchema") or metadata.get("parameters")
+            if schema and isinstance(schema, tuple):
+                schema = schema[0]
+        if schema and not isinstance(schema, dict):
+            try:
+                schema = dict(schema)
+            except Exception:  # noqa: BLE001
+                schema = None
+        if not schema:
+            debug_bits = [f"args_schema={type(args_schema).__name__}"]
+            for attr in ("model_json_schema", "json_schema", "schema"):
+                debug_bits.append(f"has_{attr}={hasattr(args_schema, attr)}")
+            metadata = getattr(tool, "metadata", {}) or {}
+            if metadata:
+                try:
+                    meta_preview = json.dumps(metadata, indent=2, ensure_ascii=False)
+                except Exception:  # noqa: BLE001
+                    meta_preview = str(metadata)
+                print(f"   {{ }} (no parameter schema provided; metadata fallback available)")
+                print(textwrap.indent(meta_preview, "     "))
+            else:
+                print("   { } (no parameter schema provided)")
+            print(textwrap.indent("; ".join(debug_bits), "     "))
+            continue
+
+        properties = schema.get("properties") or {}
+        required_fields = set(schema.get("required") or [])
+        if not properties:
+            formatted = json.dumps(schema, indent=2, ensure_ascii=False)
+            print(textwrap.indent(formatted, "   "))
+            continue
+
+        for field, spec in properties.items():
+            field_type = _format_field_type(spec)
+            required_note = " (required)" if field in required_fields else ""
+            description = spec.get("description") or ""
+            line = f"   • {field}: {field_type}{required_note}"
+            if description:
+                line += f" - {description.strip()}"
+            print(line)
+
 async def monitor_loop(
     config_path: str,
     stall_threshold: int,
@@ -350,6 +465,10 @@ async def monitor_loop(
             plugin_enabled = False
             plugin = None
 
+    show_catalog = _env_truthy(os.getenv("SHOW_TOOL_CATALOG")) or _env_truthy(
+        os.getenv("LANGGRAPH_TOOL_DEBUG")
+    )
+
     if plugin:
         current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         plugin.attach_monitor_context(
@@ -360,6 +479,8 @@ async def monitor_loop(
         )
         if tool_manager:
             plugin.set_tool_manager(tool_manager)
+            if show_catalog:
+                await _print_tool_catalog(tool_manager)
 
     seen_ids: set[str] = set()
 
