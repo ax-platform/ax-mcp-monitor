@@ -92,6 +92,20 @@ class MessageStore:
         finally:
             conn.close()
 
+    def _row_to_message(self, row: tuple) -> StoredMessage:
+        return StoredMessage(
+            id=row[0],
+            raw_content=row[1],
+            parsed_author=row[2],
+            parsed_mention=row[3],
+            sender_handle=row[4],
+            status=row[5],
+            created_at=row[6],
+            processed_at=row[7],
+            retry_count=row[8] or 0,
+            error_message=row[9],
+        )
+
     def store_message(self, message: StoredMessage) -> bool:
         """Store message with basic guarantee"""
         conn = sqlite3.connect(self.db_path)
@@ -115,19 +129,66 @@ class MessageStore:
         finally:
             conn.close()
 
-    def update_message_status(self, message_id: str, status: MessageStatus, error_message: Optional[str] = None):
+    def update_message_status(
+        self,
+        message_id: str,
+        status: MessageStatus,
+        error_message: Optional[str] = None,
+        retry_count: Optional[int] = None,
+    ) -> None:
         """Update message status"""
         conn = sqlite3.connect(self.db_path)
         try:
-            processed_at = datetime.now(timezone.utc).isoformat() if status in [MessageStatus.COMPLETED, MessageStatus.FAILED] else None
+            processed_at = (
+                datetime.now(timezone.utc).isoformat()
+                if status in [MessageStatus.COMPLETED, MessageStatus.FAILED]
+                else None
+            )
             conn.execute("""
                 UPDATE messages
-                SET status = ?, processed_at = ?, error_message = ?
+                SET status = ?, processed_at = ?, error_message = ?,
+                    retry_count = CASE WHEN ? IS NULL THEN retry_count ELSE ? END
                 WHERE id = ?
-            """, (status.value, processed_at, error_message, message_id))
+            """, (status.value, processed_at, error_message, retry_count, retry_count, message_id))
             conn.commit()
         except Exception as e:
             print(f"⚠️ Failed to update message status: {e}")
+        finally:
+            conn.close()
+
+    def fetch_messages(self, statuses: list[str], limit: int = 5) -> list[StoredMessage]:
+        if not statuses:
+            return []
+
+        placeholders = ",".join(["?"] * len(statuses))
+        query = f"""
+            SELECT id, raw_content, parsed_author, parsed_mention, sender_handle,
+                   status, created_at, processed_at, retry_count, error_message
+            FROM messages
+            WHERE status IN ({placeholders})
+            ORDER BY datetime(created_at) ASC
+            LIMIT ?
+        """
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(query, (*statuses, limit))
+            rows = cursor.fetchall()
+            return [self._row_to_message(row) for row in rows]
+        finally:
+            conn.close()
+
+    def reset_processing(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE messages
+                SET status = 'pending', error_message = NULL
+                WHERE status = 'processing'
+            """
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -147,6 +208,10 @@ DEFAULT_WAIT_TIMEOUT = 35  # seconds — below the proxy timeout
 # Heartbeat system removed - using welcome screen instead
 MAX_BACKOFF_RETRIES = 3
 STALL_THRESHOLD = 120  # seconds without mention or heartbeat => reconnect
+
+QUEUE_BATCH_LIMIT = int(os.getenv("LANGGRAPH_QUEUE_BATCH_LIMIT", "5"))
+QUEUE_MAX_RETRIES = int(os.getenv("LANGGRAPH_QUEUE_MAX_RETRIES", "5"))
+QUEUE_RETRY_BASE_DELAY = float(os.getenv("LANGGRAPH_QUEUE_RETRY_BASE_DELAY", "1.5"))
 
 
 def _load_server_name(client: MCPClient) -> str:
@@ -485,6 +550,115 @@ async def monitor_loop(
     seen_ids: set[str] = set()
 
     last_activity = time.time()
+    queue_batch_limit = max(1, QUEUE_BATCH_LIMIT)
+
+    async def handle_stored_message(stored: StoredMessage) -> None:
+        nonlocal last_activity
+        last_activity = time.time()
+
+        sender = stored.sender_handle or "@unknown"
+        author = stored.parsed_author or "unknown"
+
+        if sender.lower() == "@unknown":
+            console_print("ℹ️ No valid mention detected; skipping response")
+            message_store.update_message_status(
+                stored.id,
+                MessageStatus.COMPLETED,
+                error_message="No valid mention detected",
+                retry_count=stored.retry_count,
+            )
+            return
+
+        message_text = _extract_message_text(stored.raw_content)
+        metadata = {
+            "sender": sender,
+            "agent_name": agent_name,
+            "ignore_mentions": [agent_name],
+        }
+
+        response_text: Optional[str] = None
+
+        if plugin_enabled and plugin:
+            try:
+                response_text = await plugin.process_message(message_text, metadata)
+            except Exception as exc:  # noqa: BLE001
+                console_print(f"⚠️ Plugin processing failed: {exc}")
+                response_text = None
+
+        if not response_text:
+            response_text = _build_ack(sender, stored.id[:8])
+            console_print(f"💬 Acknowledging {sender} (author: {author}) with {stored.id[:8]}")
+        else:
+            console_print("📝 Streaming reply:")
+            console_print(response_text)
+
+        payload = {
+            "action": "send",
+            "content": response_text,
+            "idempotency_key": stored.id,
+        }
+        sent = await _call_messages_with_retry(session, payload, retries=1)
+
+        if sent is None:
+            raise RuntimeError("Response send failed")
+
+        console_print("✅ Response dispatched")
+        message_store.update_message_status(
+            stored.id,
+            MessageStatus.COMPLETED,
+            retry_count=stored.retry_count,
+        )
+
+    async def process_pending_queue() -> None:
+        nonlocal last_activity
+
+        if session is None:
+            return
+
+        message_store.reset_processing()
+
+        statuses = [
+            MessageStatus.PENDING.value,
+            MessageStatus.PROCESSING.value,
+            MessageStatus.FAILED.value,
+        ]
+        pending_messages = message_store.fetch_messages(
+            statuses,
+            limit=queue_batch_limit,
+        )
+
+        for stored in pending_messages:
+            message_store.update_message_status(
+                stored.id,
+                MessageStatus.PROCESSING,
+                error_message=None,
+                retry_count=stored.retry_count,
+            )
+            try:
+                await handle_stored_message(stored)
+            except Exception as exc:  # noqa: BLE001
+                new_retry = (stored.retry_count or 0) + 1
+                if new_retry >= QUEUE_MAX_RETRIES:
+                    console_print(
+                        f"❌ Message {stored.id[:8]} failed after {new_retry} attempts: {exc}"
+                    )
+                    message_store.update_message_status(
+                        stored.id,
+                        MessageStatus.FAILED,
+                        error_message=str(exc),
+                        retry_count=new_retry,
+                    )
+                else:
+                    console_print(
+                        f"⚠️ Queue retry {new_retry} scheduled for {stored.id[:8]}: {exc}"
+                    )
+                    message_store.update_message_status(
+                        stored.id,
+                        MessageStatus.PENDING,
+                        error_message=str(exc),
+                        retry_count=new_retry,
+                    )
+                    await asyncio.sleep(min(QUEUE_RETRY_BASE_DELAY * new_retry, 5.0))
 
     def console_print(*args, **kwargs) -> None:
         if "flush" not in kwargs:
@@ -497,6 +671,7 @@ async def monitor_loop(
 
     try:
         while True:
+            await process_pending_queue()
             if time.time() - last_activity > stall_threshold:
                 console_print("⚠️ Detected stall; attempting reconnect")
                 await client.close_all_sessions()
@@ -521,6 +696,7 @@ async def monitor_loop(
             )
             if result is None:
                 continue
+            last_activity = time.time()
             raw = _extract_text(result)
             if not raw:
                 continue
@@ -541,7 +717,7 @@ async def monitor_loop(
                 parsed_author=None,  # Will be set below
                 parsed_mention=None,  # Will be set below
                 sender_handle=None,   # Will be set below
-                status=MessageStatus.PROCESSING.value,
+                status=MessageStatus.PENDING.value,
                 created_at=datetime.now(timezone.utc).isoformat()
             )
 
@@ -556,49 +732,8 @@ async def monitor_loop(
             if message_store.store_message(stored_message):
                 console_print(f"📥 Message stored: {mid[:8]}...")
 
-            if sender.lower() == "@unknown":
-                console_print("ℹ️ No valid mention detected; skipping response")
-                message_store.update_message_status(mid, MessageStatus.COMPLETED, "No valid mention detected")
-                continue
-
-            response_text: Optional[str] = None
-
-            if plugin_enabled and plugin:
-                message_text = _extract_message_text(raw)
-                metadata = {
-                    "sender": sender,
-                    "agent_name": agent_name,
-                    "ignore_mentions": [agent_name],
-                }
-                try:
-                    response_text = await plugin.process_message(message_text, metadata)
-                except Exception as exc:  # noqa: BLE001
-                    console_print(f"⚠️ Plugin processing failed: {exc}")
-                    # Note: Don't mark as failed here since we'll still send an acknowledgment
-                    response_text = None
-
-            if not response_text:
-                response_text = _build_ack(sender, mid[:8])
-                console_print(f"💬 Acknowledging {sender} (author: {author}) with {mid[:8]}")
-            else:
-                console_print("📝 Streaming reply:")
-                console_print(response_text)
-
-            sent = await _call_messages_with_retry(
-                session,
-                {
-                    "action": "send",
-                    "content": response_text,
-                    "idempotency_key": mid,
-                },
-                retries=1,
-            )
-            if sent is not None:
-                console_print("✅ Response dispatched")
-                message_store.update_message_status(mid, MessageStatus.COMPLETED)
-            else:
-                console_print(f"❌ Response send failed for {mid[:8]}")
-                message_store.update_message_status(mid, MessageStatus.FAILED, "Response send failed")
+            await process_pending_queue()
+            continue
     except asyncio.CancelledError:
         pass
     finally:

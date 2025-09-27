@@ -18,7 +18,7 @@ fi
 DEFAULT_MODE=0
 FORWARD_ARGS=()
 MODE_SELECTION=""
-SINGLE_AGENT_BEHAVIOR="monitor"
+SINGLE_AGENT_BEHAVIOR="langgraph"
 CONVERSATION_MODE=0
 DEFAULT_BASE_PROMPT_PATH="$(pwd)/prompts/ax_base_system_prompt.txt"
 BASE_SYSTEM_PROMPT_PATH="$DEFAULT_BASE_PROMPT_PATH"
@@ -1668,18 +1668,32 @@ select_single_agent_behavior() {
     echo ""
     echo -e "${CYAN}🔌 Plugin Selection:${NC}"
 
-    local default_behavior="${SINGLE_AGENT_BEHAVIOR:-monitor}"
+    local default_behavior="${SINGLE_AGENT_BEHAVIOR:-langgraph}"
     local default_index=1
-    if [[ "$default_behavior" == "kickoff" ]]; then
-        default_index=2
-    fi
+    case "$default_behavior" in
+        langgraph)
+            default_index=1
+            ;;
+        monitor)
+            default_index=2
+            ;;
+        kickoff)
+            default_index=3
+            ;;
+        openrouter)
+            default_index=4
+            ;;
+        *)
+            default_index=2
+            ;;
+    esac
 
     if (( DEFAULT_MODE )); then
-        SINGLE_AGENT_BEHAVIOR="monitor"
+        SINGLE_AGENT_BEHAVIOR="langgraph"
         CONVERSATION_MODE=0
-        export PLUGIN_TYPE="ollama"
-        echo "   👉 Auto-selecting Ollama Monitor Mode"
-        if ! select_ollama_model; then
+        export PLUGIN_TYPE="langgraph"
+        echo "   👉 Auto-selecting LangGraph Monitor Mode"
+        if ! select_langgraph_backend; then
             return 1
         fi
         select_system_prompt
@@ -1687,17 +1701,17 @@ select_single_agent_behavior() {
         return 0
     fi
 
-    default_index=1
-
     local options=(
+        "langgraph::🕸️ LangGraph Monitor Mode::Route replies through LangGraph with MCP tool support"
         "monitor::🧠 Ollama Monitor Mode::LLM monitors for a mention in aX"
         "kickoff::🗣️ Ollama Conversation Mode::Trigger a short conversation, then keep listening"
         "openrouter::🌐 OpenRouter Monitor Mode::Use OpenRouter-hosted completions (e.g., Grok 4 Fast)"
-        "langgraph::🕸️ LangGraph Monitor Mode::Route replies through LangGraph with MCP tool support"
     )
 
     local selection
     selection=$(cursor_menu "${CYAN}Pick Your Plugin:${NC}" "${YELLOW}Use ↑/↓ or j/k, Enter to select. Press q to quit.${NC}" "$default_index" "${options[@]}") || exit_with_goodbye
+
+    SINGLE_AGENT_BEHAVIOR="$selection"
 
     LANGGRAPH_BACKEND=""
 
@@ -1725,7 +1739,7 @@ select_single_agent_behavior() {
             STARTUP_ACTION="listen_only"
             ;;
         openrouter)
-            SINGLE_AGENT_BEHAVIOR="monitor"
+            SINGLE_AGENT_BEHAVIOR="openrouter"
             CONVERSATION_MODE=0
             export PLUGIN_TYPE="openrouter"
             echo -e "${GREEN}✅ Selected: OpenRouter Monitor Mode${NC}"
@@ -1736,7 +1750,7 @@ select_single_agent_behavior() {
             STARTUP_ACTION="listen_only"
             ;;
         langgraph)
-            SINGLE_AGENT_BEHAVIOR="monitor"
+            SINGLE_AGENT_BEHAVIOR="langgraph"
             CONVERSATION_MODE=0
             export PLUGIN_TYPE="langgraph"
             echo -e "${GREEN}✅ Selected: LangGraph Monitor Mode${NC}"
@@ -2249,7 +2263,7 @@ print_banner() {
 
 reset_session_state() {
     MODE_SELECTION=""
-    SINGLE_AGENT_BEHAVIOR="monitor"
+    SINGLE_AGENT_BEHAVIOR="langgraph"
     CONVERSATION_MODE=0
     STARTUP_ACTION="listen_only"
     PLUGIN_TYPE=""
@@ -2378,7 +2392,11 @@ echo "   Agent: ${AGENT_EMOJI} $AGENT_HANDLE"
 if [[ "$MODE_SELECTION" == "echo" ]]; then
     echo "   Mode: Echo monitor"
 else
-    echo "   Mode: Single agent"
+    if [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
+        echo "   Mode: LangGraph monitor"
+    else
+        echo "   Mode: Single agent"
+    fi
     if [[ "$SINGLE_AGENT_BEHAVIOR" == "kickoff" ]]; then
         echo "   Behavior: conversation kickoff"
     else
@@ -2425,39 +2443,95 @@ fi
 
 # Final summary and start
 echo ""
-echo -e "${BLUE}🎯 Starting MCP Monitor...${NC}"
-echo "   Listening for ${AGENT_EMOJI} $AGENT_HANDLE mentions"
-echo "   Mode: $MODE_SELECTION"
-echo "   Plugin: $PLUGIN_TYPE"
-if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
-    echo "   Model: $OLLAMA_MODEL"
-elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
-    echo "   Model: $OPENROUTER_MODEL"
-elif [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
+
+# Run the monitor
+monitor_exit=0
+set +e
+if [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
+    echo -e "${BLUE}🎯 Starting LangGraph Heartbeat Monitor...${NC}"
+    echo "   Listening for ${AGENT_EMOJI} $AGENT_HANDLE mentions"
     echo "   LangGraph backend: ${LANGGRAPH_BACKEND:-openrouter}"
     if [[ "$LANGGRAPH_BACKEND" == "ollama" ]]; then
         echo "   Model: $OLLAMA_MODEL"
     else
         echo "   Model: $OPENROUTER_MODEL"
     fi
-fi
-if [[ "$MODE_SELECTION" != "echo" ]]; then
     print_system_prompt_details "   " "$LAST_SYSTEM_PROMPT_SOURCE" "$LAST_SYSTEM_PROMPT_TEXT"
-fi
-echo "   Press Ctrl+C to stop"
-echo ""
-echo -e "${CYAN}💡 Test by mentioning ${AGENT_EMOJI} $AGENT_HANDLE in the aX platform!${NC}"
-echo ""
+    echo "   Press Ctrl+C to stop"
+    echo ""
+    echo -e "${CYAN}💡 Test by mentioning ${AGENT_EMOJI} $AGENT_HANDLE in the aX platform!${NC}"
+    echo ""
 
-# Run the monitor
-monitor_exit=0
-set +e
-if (( ${#FORWARD_ARGS[@]} )); then
-    uv run reliable_monitor.py --loop "${FORWARD_ARGS[@]}"
+    langgraph_wait_timeout="${WAIT_TIMEOUT:-35}"
+    langgraph_stall_threshold="${STALL_THRESHOLD:-180}"
+    heartbeat_cmd=(uv run python scripts/mcp_use_heartbeat_monitor.py --config "$MCP_CONFIG_PATH" --plugin langgraph --wait-timeout "$langgraph_wait_timeout" --stall-threshold "$langgraph_stall_threshold")
+
+    if [[ ${SHOW_TOOL_CATALOG+x} ]]; then
+        prev_show_tool_catalog="$SHOW_TOOL_CATALOG"
+    else
+        unset prev_show_tool_catalog
+    fi
+    if [[ ${LANGGRAPH_TOOL_DEBUG+x} ]]; then
+        prev_langgraph_tool_debug="$LANGGRAPH_TOOL_DEBUG"
+    else
+        unset prev_langgraph_tool_debug
+    fi
+
+    export SHOW_TOOL_CATALOG=1
+    unset LANGGRAPH_TOOL_DEBUG
+    if [[ -z "${MCP_USE_LOG_LEVEL:-}" ]]; then
+        export MCP_USE_LOG_LEVEL=error
+    fi
+
+    if (( ${#FORWARD_ARGS[@]} )); then
+        for forwarded in "${FORWARD_ARGS[@]}"; do
+            if [[ "$forwarded" == "--tool-debug" ]]; then
+                export LANGGRAPH_TOOL_DEBUG=1
+            else
+                echo -e "${YELLOW}ℹ️  Forwarded argument '$forwarded' is not used in LangGraph mode.${NC}"
+            fi
+        done
+    fi
+
+    "${heartbeat_cmd[@]}"
     monitor_exit=$?
+
+    if [[ ${prev_show_tool_catalog+x} ]]; then
+        export SHOW_TOOL_CATALOG="$prev_show_tool_catalog"
+    else
+        unset SHOW_TOOL_CATALOG
+    fi
+    if [[ ${prev_langgraph_tool_debug+x} ]]; then
+        export LANGGRAPH_TOOL_DEBUG="$prev_langgraph_tool_debug"
+    else
+        unset LANGGRAPH_TOOL_DEBUG
+    fi
+    unset prev_show_tool_catalog prev_langgraph_tool_debug
 else
-    uv run reliable_monitor.py --loop
-    monitor_exit=$?
+    echo -e "${BLUE}🎯 Starting MCP Monitor...${NC}"
+    echo "   Listening for ${AGENT_EMOJI} $AGENT_HANDLE mentions"
+    echo "   Mode: $MODE_SELECTION"
+    echo "   Plugin: $PLUGIN_TYPE"
+    if [[ "$PLUGIN_TYPE" == "ollama" ]]; then
+        echo "   Model: $OLLAMA_MODEL"
+    elif [[ "$PLUGIN_TYPE" == "openrouter" ]]; then
+        echo "   Model: $OPENROUTER_MODEL"
+    fi
+    if [[ "$MODE_SELECTION" != "echo" ]]; then
+        print_system_prompt_details "   " "$LAST_SYSTEM_PROMPT_SOURCE" "$LAST_SYSTEM_PROMPT_TEXT"
+    fi
+    echo "   Press Ctrl+C to stop"
+    echo ""
+    echo -e "${CYAN}💡 Test by mentioning ${AGENT_EMOJI} $AGENT_HANDLE in the aX platform!${NC}"
+    echo ""
+
+    if (( ${#FORWARD_ARGS[@]} )); then
+        uv run reliable_monitor.py --loop "${FORWARD_ARGS[@]}"
+        monitor_exit=$?
+    else
+        uv run reliable_monitor.py --loop
+        monitor_exit=$?
+    fi
 fi
 set -e
 

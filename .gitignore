@@ -40,3 +40,7 @@ configs/*.sh
 # Tests stay local
 tests/
 
+.gemini/settings.json
+GEMINI.md
+AGENTS.md
+grok/*
