@@ -2464,7 +2464,7 @@ if [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
 
     langgraph_wait_timeout="${WAIT_TIMEOUT:-35}"
     langgraph_stall_threshold="${STALL_THRESHOLD:-180}"
-    heartbeat_cmd=(uv run python scripts/mcp_use_heartbeat_monitor.py --config "$MCP_CONFIG_PATH" --plugin langgraph --wait-timeout "$langgraph_wait_timeout" --stall-threshold "$langgraph_stall_threshold")
+    heartbeat_cmd=(env PYTHONUNBUFFERED=1 uv run python scripts/mcp_use_heartbeat_monitor.py --config "$MCP_CONFIG_PATH" --plugin langgraph --wait-timeout "$langgraph_wait_timeout" --stall-threshold "$langgraph_stall_threshold")
 
     if [[ ${SHOW_TOOL_CATALOG+x} ]]; then
         prev_show_tool_catalog="$SHOW_TOOL_CATALOG"
@@ -2493,8 +2493,10 @@ if [[ "$PLUGIN_TYPE" == "langgraph" ]]; then
         done
     fi
 
-    "${heartbeat_cmd[@]}"
-    monitor_exit=$?
+    {
+        "${heartbeat_cmd[@]}"
+        monitor_exit=${PIPESTATUS[0]}
+    } 2>> logs/universal_langgraph_transport.err | tee logs/universal_langgraph_monitor.log
 
     if [[ ${prev_show_tool_catalog+x} ]]; then
         export SHOW_TOOL_CATALOG="$prev_show_tool_catalog"

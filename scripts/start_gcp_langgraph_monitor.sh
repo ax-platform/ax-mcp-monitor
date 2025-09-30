@@ -192,7 +192,7 @@ if [[ ${#FORWARDED_ARGS[@]} -gt 0 ]]; then
     MONITOR_CMD_ARGS+=("${FORWARDED_ARGS[@]}")
 fi
 
-.venv/bin/python scripts/mcp_use_heartbeat_monitor.py \
+env PYTHONUNBUFFERED=1 .venv/bin/python scripts/mcp_use_heartbeat_monitor.py \
     --config "$CONFIG_PATH" \
     --plugin langgraph \
     --wait-timeout "${WAIT_TIMEOUT:-25}" \
