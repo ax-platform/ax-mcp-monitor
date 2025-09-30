@@ -313,15 +313,29 @@ def _allowed_directories(server_configs) -> list[str]:
 
 def _extract_message_text(raw: str) -> str:
     """Return the human-authored content from a mention block."""
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    cleaned = [line for line in lines if not line.startswith("✅ WAIT SUCCESS")]
-    for line in cleaned:
+    lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
+    message_lines: list[str] = []
+    capture = False
+
+    for line in lines:
+        if line.startswith("✅ WAIT SUCCESS"):
+            continue
+
         if line.startswith("•") or line.startswith("-"):
             body = line.lstrip("•- \t")
             if ":" in body:
                 _, tail = body.split(":", 1)
-                return tail.strip()
-            return body.strip()
+                message_lines.append(tail.strip())
+            else:
+                message_lines.append(body.strip())
+            capture = True
+            continue
+
+        if capture:
+            message_lines.append(line.strip())
+
+    if message_lines:
+        return "\n".join(message_lines).strip()
     return raw.strip()
 
 
