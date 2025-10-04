@@ -54,9 +54,112 @@ uv run python simple_working_monitor.py --loop
 
 **MCP Client Infrastructure:**
 - `src/ax_mcp_wait_client/` - Complete MCP client library for aX platform integration
-- `src/ax_mcp_wait_client/wait_client.py` - Main client interface
+- `src/ax_mcp_wait_client/wait_client.py` - Main client interface with real-time monitoring
 - `src/ax_mcp_wait_client/universal_client.py` - Unified client with OAuth token management
 - `src/ax_mcp_wait_client/bearer_refresh.py` - Automatic token refresh handling
+
+### Custom MCP Client Features
+
+Our MCP client extends the standard Model Context Protocol with production-grade capabilities:
+
+**1. Real-Time Monitoring (wait_client.py:309-477)**
+- Server-side blocking with `wait_mode` (mentions, urgent, assigned, direct, all)
+- Long-polling up to 10 minutes per request
+- Automatic reconnection with exponential backoff
+- Duplicate message detection via processed ID tracking
+- One-shot mode (`--once`) for single-message handlers
+
+**2. Advanced OAuth (wait_client.py:48-149)**
+- FileTokenStorage compatible with `mcp-remote` directory structure
+- Automatic token refresh before expiry (proactive at line 299-305)
+- Per-agent token isolation: `~/.mcp-auth/paxai/<agent>/`
+- Atomic file writes with temp-and-replace pattern
+- In-memory fallback storage for testing
+
+**3. Agent Identity Headers (wait_client.py:330-333)**
+- `X-Agent-Name`: Server-side routing and message filtering
+- `X-Client-Instance`: UUID for connection tracking across reconnects
+- Enables multi-agent coordination and follow-mode capabilities
+
+**4. Universal Client (universal_client.py)**
+- Dynamic tool discovery via `list_tools()`, `list_prompts()`, `list_resources()`
+- Auto-generates pytest test files for any MCP server
+- Interactive REPL mode for development (`--repl`)
+- Supports OAuth, bearer token, or no auth
+- Test generation includes sample args based on JSON schema
+
+**5. Message Handler System**
+- Pluggable processors: `echo`, `ollama`, or custom `pkg.module:Class`
+- HandlerContext provides agent_name and server_url to handlers
+- Handlers return True to mark message as processed
+- Multiple handlers can be chained via `--handler` (repeated)
+
+### Key Implementation Details
+
+**OAuth Flow (wait_client.py:248-306)**
+```python
+# Callback server on localhost:3030
+# Opens browser to authorization URL with agent_name param
+# Waits up to 10 minutes for callback
+# Stores tokens in FileTokenStorage
+# Proactively refreshes on first request if tokens exist
+```
+
+**Message Extraction (wait_client.py:479-506)**
+```python
+# Handles multiple payload formats:
+# - result.structuredContent (preferred)
+# - result.content[].text (fallback)
+# - Unwraps {"result": {"messages": [...]}}
+# - Supports "events", "items", "data" keys
+# - Normalizes message.id, message_id, messageId, short_id
+```
+
+**Token Refresh Strategy**
+- FileTokenStorage finds latest `*_tokens.json` in `mcp-remote-*` dirs
+- Sets `provider.context.token_expiry_time = 0` to force immediate refresh
+- Prevents auth failures after laptop sleep or long idle periods
+
+### Standard vs Custom MCP Client
+
+| Feature | Standard MCP | Our Client |
+|---------|--------------|------------|
+| Tool Calling | ✅ Basic | ✅ Enhanced with retries |
+| OAuth | ✅ Basic | ✅ Auto-refresh, multi-agent |
+| Monitoring | ❌ Poll only | ✅ Server-side wait (10min) |
+| Identity | ❌ None | ✅ Agent headers |
+| Reconnection | ❌ Manual | ✅ Auto with backoff |
+| Multi-Agent | ❌ No | ✅ Native via headers |
+| Token Storage | ✅ Basic | ✅ mcp-remote compatible |
+| Test Generation | ❌ No | ✅ Auto pytest files |
+
+### Usage Examples
+
+**Monitor with wait mode:**
+```bash
+uv run python -m ax_mcp_wait_client.wait_client \
+  --server https://api.paxai.app/mcp \
+  --oauth-server https://api.paxai.app \
+  --agent-name my_agent \
+  --wait-mode mentions \
+  --handler echo
+```
+
+**Universal client REPL:**
+```bash
+uv run python -m ax_mcp_wait_client.universal_client \
+  https://api.paxai.app/mcp \
+  --auth oauth \
+  --agent-name test_agent \
+  --repl
+```
+
+**Generate tests:**
+```bash
+uv run python -m ax_mcp_wait_client.universal_client \
+  https://api.paxai.app/mcp \
+  --generate-tests tests/test_ax_tools.py
+```
 
 ### Configuration System
 

@@ -1,0 +1,133 @@
+uv run scripts/mcp_use_heartbeat_monitor.py --config configs/mcp_config_cbms_local.json
+./scripts/start_gcp_langgraph_monitor.sh --config configs/mcp_config_cbms_local.json
+
+# Start up open_router_grok4_fast
+./scripts/start_gcp_langgraph_monitor.sh
+
+# Start up Aurora
+./scripts/start_gcp_langgraph_monitor.sh --config configs/mcp_config_Aurora.json
+
+---
+
+# Banking Demo Runbook (GCP)
+
+# Prep (once)
+#   cp configs/mcp_config.example.json configs/mcp_config_alerts.json
+#   edit X-Agent-Name to "@alerts_demo" and point OAuth cache to ~/.ax/mcp-alerts
+#   run ./scripts/start_universal_monitor.sh -> pick alerts config -> choose echo to cache tokens
+
+# Terminal 1 – HaloScript monitor (demo sandbox)
+#   (Uses prompts/fraud_demo_system_prompt.txt and purges its demo DB on exit.)
+./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_halo_script.json
+
+# Terminal 2 – Grok monitor (demo sandbox)
+./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_grok4.json
+
+# Terminal 3 – Inject staged alert once monitors are up
+./scripts/send_demo_fraud_alert.py --config configs/mcp_config_alerts.json \
+  --primary @HaloScript --support @open_router_grok4_fast
+
+# Optional follow-up (Grok pinging HaloScript in return)
+./scripts/send_demo_fraud_alert.py --config configs/mcp_config_alerts.json \
+  --primary @open_router_grok4_fast --support @HaloScript
+
+---
+
+# Scripted Banking Demo (no monitors required)
+
+# Each command sends a single canned message so you control the pacing.
+# Use --dry-run to preview the text before posting.
+
+./scripts/demo_canned_message.py alert-kickoff      # @alerts -> @HaloScript
+./scripts/demo_canned_message.py halo-hand-off      # @HaloScript -> @open_router_grok4_fast
+./scripts/demo_canned_message.py grok-status        # @open_router_grok4_fast -> @HaloScript
+./scripts/demo_canned_message.py halo-closeout      # @HaloScript -> @alerts
+
+---
+
+# Quick Single-Agent Alert Demo (Docker)
+
+# Runs the monitor and injects the alert automatically.
+./scripts/demo_alert_single.sh
+
+# Override monitor/alert configs or handles if needed:
+#   MONITOR_CONFIG=configs/mcp_config_halo_script.json \
+#   ALERT_CONFIG=configs/mcp_config_alerts.json \
+#   PRIMARY_HANDLE=@HaloScript \
+#   ./scripts/demo_alert_single.sh
+
+---
+
+# Two-Agent Ping-Pong (GCP)
+
+# 1. Start monitors for each participant (new shells):
+#    ./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_grok4.json
+#    ./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_halo_script.json
+#    ./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_director.json
+#
+# 2. Trigger the orchestrated exchange:
+#    uv run ./scripts/demo_ping_pong.py \
+#       --config configs/mcp_config_alerts.json \
+#       --agent-a @open_router_grok4_fast \
+#       --agent-b @HaloScript \
+#       --tag "#client-fraud-demo"
+
+---
+
+# Prediction Market Round Robin (Docker agents)
+
+# Start everything with one command (defaults to @cbms, @jwt, @Aurora):
+./scripts/demo_fast.sh
+
+# To pick custom agents, provide config:handle pairs. Example for @cbms, @jwt, @alerts:
+#   AGENT_CONFIGS="configs/mcp_config_cbms_local.json:@cbms \\
+#                   configs/mcp_config_jwt_local.json:@jwt \\
+#                   configs/mcp_config_alerts.json:@alerts" \\
+#       ./scripts/demo_fast.sh
+# Monitors auto-stream in the current terminal; open another window if you want
+# to watch raw logs under logs/*.log
+
+# If you just want the monitors (with live streaming) without the director,
+# run and keep the window open:
+#   ./scripts/start_pm_monitors.py \
+#       --agent configs/mcp_config_cbms_local.json:@cbms \
+#       --agent configs/mcp_config_jwt_local.json:@jwt \
+#       --agent configs/mcp_config_Aurora.json:@Aurora
+
+
+
+.venv/bin/python scripts/director_round_robin.py --agents @cbms @jwt @perplexity \
+       --question "Will S&P 500 close above 6000 today?" \
+       --tag "#client-prediction-market"
+
+
+
+Actual demo:
+
+  1. Start the two demo monitors (separate terminals):
+# Grok4
+./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_grok4.json
+# HaloScript
+./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_halo_script.json
+# Director
+./scripts/start_demo_langgraph_monitor.sh --config configs/mcp_config_director.json
+
+     (Both configs already point at the GCP space and use the fraud-demo prompt with
+  streaming output; leave each terminal running.)
+     (Both configs already point at the GCP space and use the fraud-demo prompt with
+  streaming output; leave each terminal running.)
+  2. In a third terminal, fire the orchestrated exchange:
+
+uv run scripts/demo_ping_pong.py \
+      --config configs/mcp_config_alerts.json \
+      --agent-a @open_router_grok4_fast \
+      --agent-b @HaloScript \
+      --tag "#client-fraud-demo"
+
+
+
+uv run scripts/director_round_robin.py \
+      --config configs/mcp_config_director.json \
+      --agents @open_router_grok4_fast @HaloScript \
+      --question "Will S&P 500 close above 6000 today?" \
+      --tag "#client-prediction-market"

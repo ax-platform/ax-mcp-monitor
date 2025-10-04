@@ -92,6 +92,9 @@ class MessageStore:
         finally:
             conn.close()
 
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
     def _row_to_message(self, row: tuple) -> StoredMessage:
         return StoredMessage(
             id=row[0],
@@ -108,7 +111,7 @@ class MessageStore:
 
     def store_message(self, message: StoredMessage) -> bool:
         """Store message with basic guarantee"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO messages
@@ -137,7 +140,7 @@ class MessageStore:
         retry_count: Optional[int] = None,
     ) -> None:
         """Update message status"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             processed_at = (
                 datetime.now(timezone.utc).isoformat()
@@ -170,7 +173,7 @@ class MessageStore:
             LIMIT ?
         """
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.execute(query, (*statuses, limit))
             rows = cursor.fetchall()
@@ -179,7 +182,7 @@ class MessageStore:
             conn.close()
 
     def reset_processing(self) -> None:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             conn.execute(
                 """
@@ -189,6 +192,37 @@ class MessageStore:
             """
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def list_message_ids(self, statuses: Optional[list[str]] = None) -> list[str]:
+        conn = self._connect()
+        try:
+            if statuses:
+                placeholders = ",".join(["?"] * len(statuses))
+                cursor = conn.execute(
+                    f"SELECT id FROM messages WHERE status IN ({placeholders})",
+                    statuses,
+                )
+            else:
+                cursor = conn.execute("SELECT id FROM messages")
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def clear_backlog(self, statuses: list[str]) -> int:
+        if not statuses:
+            return 0
+        conn = self._connect()
+        try:
+            placeholders = ",".join(["?"] * len(statuses))
+            cursor = conn.execute(
+                f"DELETE FROM messages WHERE status IN ({placeholders})",
+                statuses,
+            )
+            conn.commit()
+            count = cursor.rowcount if cursor.rowcount is not None else 0
+            return max(count, 0)
         finally:
             conn.close()
 
@@ -487,6 +521,7 @@ async def monitor_loop(
     plugin_type: str,
     plugin_config_path: Optional[str] = None,
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT,
+    replay_backlog: bool = False,
 ) -> None:
     client = MCPClient.from_config_file(config_path)
     await client.create_all_sessions()
@@ -499,8 +534,21 @@ async def monitor_loop(
         resolved = f"@{resolved}"
     agent_name = resolved
 
-    # Initialize message store
-    message_store = MessageStore()
+    # Initialize message store (allow override via MESSAGE_DB_PATH)
+    message_db_path = os.getenv("MESSAGE_DB_PATH", "messages.db")
+    message_store = MessageStore(message_db_path)
+    if message_db_path != "messages.db":
+        print(f"🗄️ Using message store: {message_db_path}")
+    existing_ids = set(message_store.list_message_ids())
+    backlog_statuses = [
+        MessageStatus.PENDING.value,
+        MessageStatus.PROCESSING.value,
+        MessageStatus.FAILED.value,
+    ]
+    if not replay_backlog:
+        skipped = message_store.clear_backlog(backlog_statuses)
+        if skipped:
+            print(f"🧹 Skipped {skipped} queued message(s) from previous session")
 
     # Show connected status
     startup_time = datetime.now().strftime("%H:%M:%S")
@@ -561,7 +609,9 @@ async def monitor_loop(
             if show_catalog:
                 await _print_tool_catalog(tool_manager)
 
-    seen_ids: set[str] = set()
+    seen_ids: set[str] = set(existing_ids)
+    if seen_ids:
+        print(f"🧾 Loaded {len(seen_ids)} historical message id(s) for dedupe")
 
     last_activity = time.time()
     queue_batch_limit = max(1, QUEUE_BATCH_LIMIT)
@@ -774,6 +824,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=DEFAULT_WAIT_TIMEOUT,
         help="Timeout (seconds) for messages.check long polls",
     )
+    parser.add_argument(
+        "--replay-backlog",
+        action="store_true",
+        help="Process stored messages from previous runs instead of skipping them on startup.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -784,6 +839,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.plugin,
                 args.plugin_config,
                 args.wait_timeout,
+                replay_backlog=args.replay_backlog,
             )
         )
     except KeyboardInterrupt:

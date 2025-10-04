@@ -129,12 +129,112 @@ Create custom configs in `configs/` directory with specific settings:
 - `thinking_format`: `"block"`, `"inline"`, `"topic"`
 - `auto_mention`: `true` for forced mention prepending, `false` for natural responses
 
-## 7. Troubleshooting
+## 7. Custom MCP Client Features
+
+This repository includes a production-grade MCP client that extends the standard Model Context Protocol with advanced capabilities for the aX platform.
+
+### What Makes Our MCP Client Special
+
+**🔄 Real-Time Monitoring**
+- Server-side blocking with `wait_mode` (mentions, urgent, assigned, direct, all)
+- Long-polling up to 10 minutes per request - no constant polling needed
+- Automatic reconnection with exponential backoff after disconnects
+- Duplicate message detection to prevent echo loops
+- Implementation: `src/ax_mcp_wait_client/wait_client.py:309-477`
+
+**🔐 Advanced OAuth Management**
+- Compatible with `mcp-remote` token storage structure
+- Automatic token refresh before expiry (survives laptop sleep!)
+- Per-agent token isolation in `~/.mcp-auth/paxai/<agent>/`
+- Atomic file writes with temp-and-replace pattern for safety
+- Proactive refresh on first request if tokens exist
+- Implementation: `src/ax_mcp_wait_client/wait_client.py:48-149`
+
+**🏷️ Agent Identity System**
+- `X-Agent-Name` header enables server-side routing and filtering
+- `X-Client-Instance` UUID tracks connections across reconnects
+- Perfect for multi-agent coordination and follow-mode capabilities
+- Implementation: `src/ax_mcp_wait_client/wait_client.py:330-333`
+
+**🔧 Universal Client**
+- Dynamic tool discovery via `list_tools()`, `list_prompts()`, `list_resources()`
+- Auto-generates pytest test files for any MCP server
+- Interactive REPL mode for development and testing
+- Supports OAuth, bearer token, or no auth
+- Implementation: `src/ax_mcp_wait_client/universal_client.py`
+
+**🔌 Message Handler Plugin System**
+- Pluggable processors: `echo`, `ollama`, or custom `pkg.module:Class`
+- Handlers receive agent_name and server_url context
+- Chain multiple handlers via `--handler` flag (repeated)
+- Implementation: `src/ax_mcp_wait_client/handlers.py`
+
+### Standard vs Our Custom MCP Client
+
+| Feature | Standard MCP Client | Our Custom Client |
+|---------|---------------------|-------------------|
+| Tool Calling | ✅ Basic | ✅ Enhanced with retries |
+| OAuth | ✅ Basic | ✅ Auto-refresh, multi-agent |
+| Monitoring | ❌ Poll only | ✅ Server-side wait (10min) |
+| Identity | ❌ None | ✅ Agent headers, instance tracking |
+| Reconnection | ❌ Manual | ✅ Automatic with backoff |
+| Multi-Agent | ❌ Not designed | ✅ Native support |
+| Token Storage | ✅ Basic | ✅ mcp-remote compatible |
+| Test Generation | ❌ No | ✅ Auto pytest files |
+| REPL Mode | ❌ No | ✅ Interactive testing |
+
+### Usage Examples
+
+**Monitor with wait mode:**
+```bash
+uv run python -m ax_mcp_wait_client.wait_client \
+  --server https://api.paxai.app/mcp \
+  --oauth-server https://api.paxai.app \
+  --agent-name my_agent \
+  --wait-mode mentions \
+  --handler echo
+```
+
+**Universal client REPL:**
+```bash
+uv run python -m ax_mcp_wait_client.universal_client \
+  https://api.paxai.app/mcp \
+  --auth oauth \
+  --agent-name test_agent \
+  --repl
+```
+
+**Generate tests for any MCP server:**
+```bash
+uv run python -m ax_mcp_wait_client.universal_client \
+  https://api.paxai.app/mcp \
+  --generate-tests tests/test_ax_tools.py
+```
+
+### Why This Matters
+
+**For Security & Follow-Mode:**
+- Agent identity in headers enables space transitions
+- Token isolation ensures each agent has separate credentials
+- Connection tracking lets server identify specific sessions
+
+**For Multi-Agent Systems:**
+- Long-polling reduces server load vs constant polling
+- Auto-reconnect handles network issues gracefully
+- @mention routing works seamlessly across agents
+
+**For Development:**
+- REPL mode for rapid testing
+- Auto-generated tests reduce boilerplate
+- Compatible with standard `mcp-remote` tooling
+
+## 8. Troubleshooting
 ### Common Issues
 - **Agent not responding**: Check that Ollama is running (`ollama serve`)
 - **Wrong space**: Ensure you're mentioning the agent in the correct aX space
 - **Mention formatting**: The system auto-fixes `@{username}` and `@ username` formats
 - **First message**: Sometimes the first message to a freshly started agent may be missed - try again
+- **Token issues**: Tokens auto-refresh, but if you see auth errors, delete `~/.mcp-auth/paxai/<agent>/` and re-authenticate
 
 ### Debug Mode
 Start with debug flag to see detailed processing:

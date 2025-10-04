@@ -14,6 +14,9 @@ dependencies = [
   "langgraph>=0.6.7",
   "langchain-mcp-adapters>=0.1.10",
   "mcp-use>=0.1.1",
+  "google-genai>=1.39.1",
+  "google-cloud-aiplatform>=1.117.0",
+  "rich>=14.1.0",
 ]
 
 [project.scripts]

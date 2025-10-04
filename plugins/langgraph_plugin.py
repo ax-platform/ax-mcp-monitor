@@ -435,7 +435,7 @@ class LanggraphPlugin(BasePlugin):
         if tool_spec:
             kwargs["tools"] = tool_spec
             kwargs["tool_choice"] = "auto"
-        use_streaming = self.enable_streaming and not tool_spec
+        use_streaming = self.enable_streaming
         if use_streaming:
             stream_result = await asyncio.to_thread(self._stream_completion, kwargs)
             if stream_result is None:
