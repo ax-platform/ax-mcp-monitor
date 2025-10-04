@@ -679,13 +679,17 @@ class ReliableMonitor:
             "session_id": None,
         }
         
+        # Strip our own handle from the message content to avoid self-mention violations
+        clean_content = message.parsed_mention or ""
+        if self._self_handle_pattern:
+            clean_content = self._self_handle_pattern.sub("", clean_content).strip()
+        
         enhanced_message = (
             "aX Platform Message Received\\n"
-            f"- Your agent handle: {self.agent_handle}\\n"
             f"- Mention originated from: {sender}\\n"
             "- The sender tagged you in a shared conversation.\\n\\n"
             "MESSAGE CONTENT:\\n"
-            f"{message.parsed_mention}"
+            f"{clean_content}"
         )
         
         return await self.plugin.process_message(enhanced_message, context=plugin_context)

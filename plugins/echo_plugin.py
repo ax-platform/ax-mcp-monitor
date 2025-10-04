@@ -4,6 +4,7 @@ Simple echo plugin for testing.
 Just echoes back the message with a prefix.
 """
 
+import re
 from typing import Dict, Any, Optional
 from .base_plugin import BasePlugin
 
@@ -17,9 +18,21 @@ class EchoPlugin(BasePlugin):
         
         Args:
             message: The incoming message
-            context: Optional context (not used)
+            context: Optional context including agent_name to avoid self-mentions
             
         Returns:
-            The echoed message
+            The echoed message with self-mentions removed
         """
-        return f"[Echo] You said: {message}"
+        # Remove our own agent handle to avoid self-mention violations
+        clean_message = message
+        if context and context.get("agent_name"):
+            agent_name = context["agent_name"]
+            # Remove @agentname (case insensitive)
+            clean_message = re.sub(
+                rf'@{re.escape(agent_name)}\b',
+                '',
+                clean_message,
+                flags=re.IGNORECASE
+            ).strip()
+        
+        return f"[Echo] You said: {clean_message}"

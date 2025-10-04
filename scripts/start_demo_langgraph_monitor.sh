@@ -88,7 +88,10 @@ if [[ -f "$PROJECT_ROOT/.env" ]]; then
     source "$PROJECT_ROOT/.env"
 fi
 
-if [[ -z "${OPENROUTER_API_KEY:-}" && "${LANGGRAPH_BACKEND:-openrouter}" == "openrouter" ]]; then
+# Default to ollama if not specified
+LANGGRAPH_BACKEND="${LANGGRAPH_BACKEND:-ollama}"
+
+if [[ -z "${OPENROUTER_API_KEY:-}" && "${LANGGRAPH_BACKEND}" == "openrouter" ]]; then
     echo "OPENROUTER_API_KEY is not set. Export it or add to .env file." >&2
     exit 1
 fi
@@ -109,16 +112,22 @@ if [[ $QUIET_FLAG -eq 1 ]]; then
 fi
 
 export LANGGRAPH_SYSTEM_PROMPT_FILE="$PROMPT_PATH"
-export LANGGRAPH_BACKEND="${LANGGRAPH_BACKEND:-openrouter}"
+export LANGGRAPH_BACKEND
 export MESSAGE_DB_PATH
 
 echo "🚀 Demo monitor launching"
-echo "   Config : $CONFIG_PATH"
-echo "   Prompt : $PROMPT_PATH"
-echo "   Msg DB : $MESSAGE_DB_PATH (ephemeral)"
-echo "   Plugin : langgraph"
+echo "   Config  : $CONFIG_PATH"
+echo "   Prompt  : $PROMPT_PATH"
+echo "   Msg DB  : $MESSAGE_DB_PATH (ephemeral)"
+echo "   Plugin  : langgraph"
+echo "   Backend : ${LANGGRAPH_BACKEND}"
+if [[ "${LANGGRAPH_BACKEND}" == "ollama" ]]; then
+    echo "   Model   : ${OLLAMA_MODEL:-gpt-oss}"
+else
+    echo "   Model   : ${OPENROUTER_MODEL:-x-ai/grok-4-fast:free}"
+fi
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
-    echo "   Extra  : ${EXTRA_ARGS[*]}"
+    echo "   Extra   : ${EXTRA_ARGS[*]}"
 fi
 echo
 
